@@ -1,0 +1,20 @@
+# Sync script
+sync_config.sh
+
+# Caches and runtime data
+__pycache__/
+*.pyc
+*.pyo
+.cache/
+
+# Dependencies & builds
+node_modules/
+
+# Editor and IDE configurations
+.vscode/
+.idea/
+*.swp
+*~
+
+# Third-party reference projects
+extra/

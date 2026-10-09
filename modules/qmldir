@@ -1,0 +1,33 @@
+singleton Theme 1.0 Theme.qml
+singleton AnimStyle 1.0 AnimStyle.qml
+AudioWidget 1.0 AudioWidget.qml
+Bar 1.0 Bar.qml
+BatteryWidget 1.0 BatteryWidget.qml
+BrightnessNotification 1.0 BrightnessNotification.qml
+CallMode 1.0 CallMode.qml
+ClockWidget 1.0 ClockWidget.qml
+ConnectedDevicesWidget 1.0 ConnectedDevicesWidget.qml
+ControlCenter 1.0 ControlCenter.qml
+ControlCenterWidget 1.0 ControlCenterWidget.qml
+DeviceDropdown 1.0 DeviceDropdown.qml
+LiquidGlassCard 1.0 LiquidGlassCard.qml
+MacSpinner 1.0 MacSpinner.qml
+MediaIsland 1.0 MediaIsland.qml
+MediaMenu 1.0 MediaMenu.qml
+MusicWidget 1.0 MusicWidget.qml
+NotificationWidget 1.0 NotificationWidget.qml
+OsdPill 1.0 OsdPill.qml
+ScreenTimeWidget 1.0 ScreenTimeWidget.qml
+StatusDevices 1.0 StatusDevices.qml
+SysStats 1.0 SysStats.qml
+TimerWidget 1.0 TimerWidget.qml
+TodoWidget 1.0 TodoWidget.qml
+Workspaces 1.0 Workspaces.qml
+Spotlight 1.0 Spotlight.qml
+SpotlightBar 1.0 SpotlightBar.qml
+SpotlightResults 1.0 SpotlightResults.qml
+SpotlightAppGrid 1.0 SpotlightAppGrid.qml
+SpotlightClipboard 1.0 SpotlightClipboard.qml
+ScreenshotWidget 1.0 ScreenshotWidget.qml
+NotificationGroupCard 1.0 NotificationGroupCard.qml
+LiquidGlassBackground 1.0 LiquidGlassBackground.qml
