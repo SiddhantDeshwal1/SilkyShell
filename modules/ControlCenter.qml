@@ -56,9 +56,10 @@ PanelWindow {
     Component.onCompleted: {
         refreshStatus()
         refreshScreenTime()
+        refreshDisplays()
     }
 
-    property string currentView: "main" // "main" | "wifi" | "bluetooth" | "sound" | "screentime"
+    property string currentView: "main" // "main" | "wifi" | "bluetooth" | "sound" | "screentime" | "display"
     property bool dndActive: false
     property bool darkModeActive: Theme.darkMode
     property bool nightLightActive: false
@@ -128,6 +129,31 @@ PanelWindow {
     // ── Brightness State ──────────────────────────────────────────────
     property real brightnessLevel: 0.8
 
+    // ── Display Management State ──────────────────────────────────────
+    property var displayMonitors: []
+    property string displaySharingMode: "single" // "single" | "extended" | "mirrored"
+    property string displayActiveProfile: "default"
+    property int displaySelectedIdx: 0
+    property bool displayProfilesExpanded: false
+    property bool displayArrangeExpanded: false
+
+    function parseDisplayJson(jsonStr) {
+        if (!jsonStr || !jsonStr.startsWith("{")) return
+        try {
+            const data = JSON.parse(jsonStr)
+            if (data.monitors) {
+                root.displayMonitors = data.monitors
+                if (root.displaySelectedIdx >= data.monitors.length) {
+                    root.displaySelectedIdx = 0
+                }
+                if (data.monitors.length > root.displaySelectedIdx) {
+                    root.displayActiveProfile = data.monitors[root.displaySelectedIdx].activeProfile || "default"
+                }
+            }
+            if (data.sharingMode) root.displaySharingMode = data.sharingMode
+        } catch (e) {}
+    }
+
     // ── Audio / Pipewire State ────────────────────────────────────────
     property var sink: Pipewire.defaultAudioSink
     property var sinkAudio: sink ? sink.audio : null
@@ -141,7 +167,7 @@ PanelWindow {
 
     function getAudioOutputSinks() {
         return Pipewire.nodes.values.filter(function(n) {
-            return n.isSink && !n.isStream
+            return n && n.isSink && !n.isStream
         })
     }
 
@@ -183,6 +209,7 @@ PanelWindow {
         function openBluetooth() { root.open = true; root.openBluetoothMenu() }
         function openSound() { root.open = true; root.openSoundMenu() }
         function openScreenTime() { root.open = true; root.openScreenTimeMenu() }
+        function openDisplay() { root.open = true; root.openDisplayMenu() }
         function goBack() { root.goBack() }
         function toggleDnd() { root.dndActive = !root.dndActive }
         function toggleDarkMode() { Theme.toggleDarkMode() }
@@ -204,6 +231,8 @@ PanelWindow {
         open = false
         currentView = "main"
         wifiPasswordPromptOpen = false
+        displayProfilesExpanded = false
+        displayArrangeExpanded = false
     }
 
     function setupMenuOrigin(menuCard, sourceWidget, fallbackX, fallbackY, fallbackScaleX, fallbackScaleY, fallbackRadius) {
@@ -266,10 +295,23 @@ PanelWindow {
         root.runShell("quickshell ipc call notifications close &")
     }
 
+    function openDisplayMenu() {
+        if (currentView === "bluetooth") stopBluetoothScan()
+        displayProfilesExpanded = false
+        displayArrangeExpanded = false
+        root.setupMenuOrigin(displayMenuCard, dispCard, 0, 75, 1.0, 0.224, 107)
+        open = true
+        currentView = "display"
+        refreshDisplays()
+        root.runShell("quickshell ipc call notifications close &")
+    }
+
     function goBack() {
         if (currentView === "bluetooth") stopBluetoothScan()
         currentView = "main"
         wifiPasswordPromptOpen = false
+        displayProfilesExpanded = false
+        displayArrangeExpanded = false
     }
 
     function formatAppIcon(iconName) {
@@ -708,6 +750,81 @@ PanelWindow {
         wifiPollProc.running = true
         btStateProc.running = true
         brightProc.running = true
+        root.refreshDisplays()
+    }
+
+    // 4. Display Manager Backend (display-manager.py)
+    Process {
+        id: displayStateProc
+        command: ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "get"]
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) {
+                root.parseDisplayJson(line.trim())
+            }
+        }
+    }
+
+    Process {
+        id: displayActionProc
+        onExited: {
+            displayRefreshTimer.restart()
+        }
+    }
+
+    Timer {
+        id: displayRefreshTimer
+        interval: 350
+        repeat: false
+        onTriggered: root.refreshDisplays()
+    }
+
+    Timer {
+        id: displayPollTimer
+        interval: 4000
+        running: root.open && root.currentView === "display"
+        repeat: true
+        onTriggered: root.refreshDisplays()
+    }
+
+    function refreshDisplays() {
+        if (!displayStateProc.running) displayStateProc.running = true
+    }
+
+    function setDisplayResolution(monName, res) {
+        displayActionProc.command = ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "set-resolution", monName, res]
+        displayActionProc.running = true
+    }
+
+    function setDisplaySharing(monName, mode, target) {
+        const cmd = ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "set-sharing", monName, mode]
+        if (target) cmd.push(target)
+        displayActionProc.command = cmd
+        displayActionProc.running = true
+    }
+
+    function setDisplayDpms(monName, state) {
+        displayActionProc.command = ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "set-dpms", monName, state]
+        displayActionProc.running = true
+    }
+
+    function setDisplayProfile(monName, profile) {
+        if (!monName) return
+        root.displayActiveProfile = profile
+        displayActionProc.command = ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "set-profile", monName, profile]
+        displayActionProc.running = true
+    }
+
+    function setDisplayArrangement(monName, arrangement) {
+        if (!monName) return
+        displayActionProc.command = ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "set-arrangement", monName, arrangement]
+        displayActionProc.running = true
+    }
+
+    function setDisplayOrientation(monName, transform) {
+        if (!monName) return
+        displayActionProc.command = ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "set-orientation", monName, transform.toString()]
+        displayActionProc.running = true
     }
 
     // Polling Timers
@@ -761,6 +878,7 @@ PanelWindow {
             if (root.currentView === "bluetooth") return btMenuCard.height
             if (root.currentView === "sound") return soundMenuCard.height
             if (root.currentView === "screentime") return screenTimeMenuCard.height
+            if (root.currentView === "display") return displayMenuCard.height
             return mainLayout.implicitHeight
         }
         height: implicitHeight
@@ -1955,8 +2073,8 @@ PanelWindow {
                     id: dispCardMouse
                     anchors.fill: parent
                     hoverEnabled: true
-                    cursorShape: Qt.ArrowCursor
-                    z: -1
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.openDisplayMenu()
                 }
 
                 ColumnLayout {
@@ -1967,12 +2085,25 @@ PanelWindow {
                     anchors.rightMargin: 16
                     spacing: 2
 
-                    Text {
-                        text: "Display"
-                        font.family: root.sfFont
-                        font.pixelSize: 16
-                        color: "#ffffff"
-                        renderType: Text.QtRendering
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        Text {
+                            text: "Display"
+                            font.family: root.sfFont
+                            font.pixelSize: 16
+                            color: "#ffffff"
+                            renderType: Text.QtRendering
+                            Layout.fillWidth: true
+                        }
+
+                        Text {
+                            font.family: root.iconFont
+                            font.pixelSize: 16
+                            color: "#7dd3fc"
+                            text: "󰅂"
+                            renderType: Text.QtRendering
+                        }
                     }
 
                     RowLayout {
@@ -4260,6 +4391,1191 @@ PanelWindow {
                             font.family: root.sfFont
                             font.pixelSize: 13
                             color: "#94a3b8"
+                        }
+                    }
+                }
+            }
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // VIEW 6: macOS DISPLAY & MONITORS SUB-MENU
+        // ══════════════════════════════════════════════════════════════
+        LiquidGlassCard {
+            id: displayMenuCard
+            width: 376
+            height: Math.min(Screen.height - 60, displayCol.implicitHeight + 28)
+            cardRadius: dynamicRadius
+            clip: true
+
+            // Pop out and merge back into originating dispCard widget
+            property real startTransX: 0
+            property real startTransY: 75
+            property real startScaleX: 1.0
+            property real startScaleY: 0.224
+            property real startRadius: 107
+
+            property real contentScaleX: startScaleX
+            property real contentScaleY: startScaleY
+            property real contentTransX: startTransX
+            property real contentTransY: startTransY
+            property real dynamicRadius: startRadius
+            property real contentOpacity: 0.0
+
+            opacity: 0.0
+            visible: opacity > 0.001
+
+            Component.onCompleted: root.setupMenuOrigin(displayMenuCard, dispCard, 0, 75, 1.0, 0.224, 107)
+
+            transform: [
+                Scale {
+                    origin.x: displayMenuCard.width / 2
+                    origin.y: displayMenuCard.height / 2
+                    xScale: displayMenuCard.contentScaleX
+                    yScale: displayMenuCard.contentScaleY
+                },
+                Translate {
+                    x: displayMenuCard.contentTransX
+                    y: displayMenuCard.contentTransY
+                }
+            ]
+
+            states: [
+                State {
+                    name: "open"
+                    when: root.currentView === "display"
+                    PropertyChanges {
+                        target: displayMenuCard
+                        opacity: 1.0
+                        contentScaleX: 1.0
+                        contentScaleY: 1.0
+                        contentTransX: 0
+                        contentTransY: 0
+                        dynamicRadius: 28
+                        contentOpacity: 1.0
+                    }
+                },
+                State {
+                    name: "closed"
+                    when: root.currentView !== "display"
+                    PropertyChanges {
+                        target: displayMenuCard
+                        opacity: 0.0
+                        contentScaleX: displayMenuCard.startScaleX
+                        contentScaleY: displayMenuCard.startScaleY
+                        contentTransX: displayMenuCard.startTransX
+                        contentTransY: displayMenuCard.startTransY
+                        dynamicRadius: displayMenuCard.startRadius
+                        contentOpacity: 0.0
+                    }
+                }
+            ]
+
+            transitions: [
+                Transition {
+                    from: "closed"; to: "open"
+                    ParallelAnimation {
+                        NumberAnimation {
+                            target: displayMenuCard; property: "opacity"
+                            duration: 110; easing.type: Easing.OutQuad
+                        }
+                        SequentialAnimation {
+                            PauseAnimation { duration: 60 }
+                            NumberAnimation {
+                                target: displayMenuCard; property: "contentOpacity"
+                                duration: 240; easing.type: Easing.OutQuad
+                            }
+                        }
+                        NumberAnimation {
+                            target: displayMenuCard
+                            properties: "contentScaleX,contentScaleY,contentTransX,contentTransY,dynamicRadius"
+                            duration: 540
+                            easing.type: Easing.BezierSpline
+                            easing.bezierCurve: root.springCurve
+                        }
+                    }
+                },
+                Transition {
+                    from: "open"; to: "closed"
+                    ParallelAnimation {
+                        NumberAnimation {
+                            target: displayMenuCard; property: "contentOpacity"
+                            to: 0.0
+                            duration: 110; easing.type: Easing.OutQuad
+                        }
+                        SequentialAnimation {
+                            PauseAnimation { duration: 320 }
+                            NumberAnimation {
+                                target: displayMenuCard; property: "opacity"
+                                to: 0.0
+                                duration: 180; easing.type: Easing.OutQuad
+                            }
+                        }
+                        NumberAnimation {
+                            target: displayMenuCard
+                            properties: "contentScaleX,contentScaleY,contentTransX,contentTransY,dynamicRadius"
+                            duration: 500
+                            easing.type: Easing.BezierSpline
+                            easing.bezierCurve: root.springCurve
+                        }
+                    }
+                }
+            ]
+
+            Flickable {
+                id: displayFlick
+                opacity: displayMenuCard.contentOpacity
+                anchors.fill: parent
+                anchors.margins: 14
+                contentHeight: displayCol.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                ColumnLayout {
+                    id: displayCol
+                    width: displayFlick.width
+                    spacing: 10
+
+                    // 1. Header: < Back | DISPLAY | % readout
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Rectangle {
+                            implicitWidth: 34
+                            implicitHeight: 34
+                            radius: 17
+                            color: backDispMouse.containsMouse ? "#33ffffff" : "#1affffff"
+
+                            Text {
+                                anchors.centerIn: parent
+                                font.family: root.iconFont
+                                font.pixelSize: 20
+                                color: "#ffffff"
+                                text: "󰁍"
+                                renderType: Text.QtRendering
+                            }
+
+                            MouseArea {
+                                id: backDispMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.goBack()
+                            }
+                        }
+
+                        Text {
+                            text: "DISPLAY"
+                            font.family: root.sfFont
+                            font.pixelSize: 15
+                            font.bold: true
+                            color: "#ffffff"
+                            renderType: Text.QtRendering
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        Text {
+                            font.family: root.sfFont
+                            font.pixelSize: 14
+                            font.bold: true
+                            color: "#93c5fd"
+                            renderType: Text.QtRendering
+                            text: Math.round(root.brightnessLevel * 100) + "%"
+                        }
+                    }
+
+                    // 2. Master Brightness Slider
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Rectangle {
+                            implicitWidth: 34
+                            implicitHeight: 34
+                            radius: 17
+                            color: "#1affffff"
+
+                            Text {
+                                anchors.centerIn: parent
+                                font.family: root.iconFont
+                                font.pixelSize: 20
+                                color: "#ffffff"
+                                text: "󰃞"
+                                renderType: Text.QtRendering
+                            }
+                        }
+
+                        Item {
+                            id: subBrightSliderItem
+                            Layout.fillWidth: true
+                            implicitHeight: 32
+
+                            property bool sliderPressed: subBrightSliderMouse.pressed
+                            property real fillFraction: Math.max(0.05, Math.min(1.0, root.brightnessLevel))
+
+                            Rectangle {
+                                id: subBrightTrack
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                height: 8
+                                radius: 4
+                                color: "#2effffff"
+                                border.color: "#40ffffff"
+                                border.width: 1
+
+                                Rectangle {
+                                    anchors.left: parent.left
+                                    anchors.top: parent.top
+                                    anchors.bottom: parent.bottom
+                                    width: parent.width * subBrightSliderItem.fillFraction
+                                    radius: 4
+                                    color: "#ffffff"
+                                }
+
+                                Rectangle {
+                                    id: subBrightKnob
+                                    width: 16
+                                    height: 16
+                                    radius: 8
+                                    color: "#ffffff"
+                                    border.color: "#e2e8f0"
+                                    border.width: 1.5
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    x: Math.max(0, Math.min(parent.width - width, parent.width * subBrightSliderItem.fillFraction - width / 2))
+                                    scale: subBrightSliderItem.sliderPressed ? 1.25 : 1.0
+                                    Behavior on scale { NumberAnimation { duration: 120 } }
+                                }
+                            }
+
+                            // 11 Precision Level Indicator Ticks
+                            Item {
+                                id: subBrightTicks
+                                anchors.left: subBrightTrack.left
+                                anchors.right: subBrightTrack.right
+                                anchors.top: subBrightTrack.bottom
+                                anchors.topMargin: 2
+                                height: 6
+
+                                Repeater {
+                                    model: 11
+                                    Rectangle {
+                                        property real progress: index / 10.0
+                                        x: Math.round(progress * (subBrightTicks.width - width))
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: index === 5 ? 2 : 1.5
+                                        height: index === 5 ? 5 : 3
+                                        radius: 1
+                                        color: progress <= root.brightnessLevel ? "#ffffff" : "#45ffffff"
+                                        opacity: progress <= root.brightnessLevel ? 0.95 : 0.4
+                                        visible: index > 0 && index < 10
+                                        Behavior on color { ColorAnimation { duration: 100 } }
+                                    }
+                                }
+                            }
+
+                            MouseArea {
+                                id: subBrightSliderMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                preventStealing: true
+
+                                function updateBrightness(mx) {
+                                    const frac = Math.max(0.05, Math.min(1.0, mx / width))
+                                    root.setBrightness(frac)
+                                }
+
+                                onPressed: function(mouse) { updateBrightness(mouse.x) }
+                                onPositionChanged: function(mouse) { if (pressed) updateBrightness(mouse.x) }
+                                onWheel: function(wheel) {
+                                    const delta = wheel.angleDelta.y > 0 ? 0.05 : -0.05
+                                    root.setBrightness(Math.max(0.05, Math.min(1.0, root.brightnessLevel + delta)))
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            implicitWidth: 34
+                            implicitHeight: 34
+                            radius: 17
+                            color: "#1affffff"
+
+                            Text {
+                                anchors.centerIn: parent
+                                font.family: root.iconFont
+                                font.pixelSize: 20
+                                color: "#ffffff"
+                                text: "󰃠"
+                                renderType: Text.QtRendering
+                            }
+                        }
+                    }
+
+                    // 3. Displays Section Header
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.topMargin: 2
+
+                        Text {
+                            text: "CONNECTED DISPLAYS"
+                            font.family: root.sfFont
+                            font.pixelSize: 11
+                            font.bold: true
+                            color: "#94a3b8"
+                            Layout.fillWidth: true
+                            renderType: Text.QtRendering
+                        }
+
+                        Text {
+                            text: root.displayMonitors.length + (root.displayMonitors.length === 1 ? " DISPLAY" : " DISPLAYS")
+                            font.family: root.sfFont
+                            font.pixelSize: 11
+                            font.bold: true
+                            color: "#64748b"
+                            renderType: Text.QtRendering
+                        }
+                    }
+
+                    // Displays List
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
+
+                        Repeater {
+                            model: root.displayMonitors
+
+                            delegate: Rectangle {
+                                id: monItem
+                                Layout.fillWidth: true
+                                implicitHeight: 52
+                                radius: 12
+
+                                property bool isSelected: root.displaySelectedIdx === index
+                                property bool isBuiltIn: modelData.isBuiltIn
+                                property bool isDpmsOn: modelData.dpmsStatus
+
+                                color: isSelected ? "#2a38bdf8" : (monMouse.containsMouse ? "#20ffffff" : "#12ffffff")
+                                border.color: isSelected ? "#8038bdf8" : "transparent"
+                                border.width: 1
+                                clip: true
+
+                                scale: monMouse.pressed ? 0.98 : 1.0
+                                Behavior on scale { NumberAnimation { duration: 100 } }
+                                Behavior on color { ColorAnimation { duration: 150 } }
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 10
+                                    anchors.rightMargin: 10
+                                    spacing: 10
+
+                                    // Display Icon Badge (32x32)
+                                    Rectangle {
+                                        Layout.preferredWidth: 32
+                                        Layout.preferredHeight: 32
+                                        radius: 16
+                                        color: monItem.isSelected ? "#007aff" : "#20ffffff"
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            font.family: root.iconFont
+                                            font.pixelSize: 18
+                                            color: "#ffffff"
+                                            renderType: Text.QtRendering
+                                            text: monItem.isBuiltIn ? "󰌢" : "󰍹"
+                                        }
+                                    }
+
+                                    // Display Details
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 1
+
+                                        Text {
+                                            text: modelData.name + (modelData.description && modelData.description !== modelData.name ? " (" + modelData.description + ")" : "")
+                                            font.family: root.sfFontMedium
+                                            font.pixelSize: 14
+                                            color: "#ffffff"
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                            renderType: Text.QtRendering
+                                        }
+
+                                        Text {
+                                            text: modelData.currentResolution + " @ " + modelData.refreshRate + "Hz" + (modelData.isMirrored ? " • Mirrored (" + modelData.mirrorOf + ")" : "")
+                                            font.family: root.sfFont
+                                            font.pixelSize: 12
+                                            color: "#94a3b8"
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                            renderType: Text.QtRendering
+                                        }
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: monMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.displaySelectedIdx = index
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 4. Resolution Switcher Section
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        visible: root.displayMonitors.length > 0
+
+                        property var curMon: (root.displayMonitors.length > root.displaySelectedIdx) ? root.displayMonitors[root.displaySelectedIdx] : (root.displayMonitors.length > 0 ? root.displayMonitors[0] : null)
+
+                        RowLayout {
+                            Layout.fillWidth: true
+
+                            Text {
+                                text: "RESOLUTION — " + (parent.parent.curMon ? parent.parent.curMon.name : "")
+                                font.family: root.sfFont
+                                font.pixelSize: 13
+                                font.bold: true
+                                color: "#cbd5e1"
+                                Layout.fillWidth: true
+                                renderType: Text.QtRendering
+                            }
+
+                            Text {
+                                text: parent.parent.curMon ? parent.parent.curMon.currentResolution : ""
+                                font.family: root.sfFontBold
+                                font.pixelSize: 12
+                                color: "#38bdf8"
+                                renderType: Text.QtRendering
+                            }
+                        }
+
+                        // Resolution Chips Grid / Flow
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Repeater {
+                                model: parent.parent.curMon ? parent.parent.curMon.resolutions.slice(0, 8) : []
+
+                                delegate: Rectangle {
+                                    implicitHeight: 30
+                                    implicitWidth: resText.implicitWidth + 20
+                                    radius: 15
+
+                                    property bool isCurrent: parent.parent.parent.curMon && parent.parent.parent.curMon.currentResolution === modelData
+
+                                    color: isCurrent ? "#007aff" : (resMouse.containsMouse ? "#28ffffff" : "#14ffffff")
+                                    border.color: isCurrent ? "#80ffffff" : "#20ffffff"
+                                    border.width: 1
+
+                                    scale: resMouse.pressed ? 0.94 : 1.0
+                                    Behavior on scale { NumberAnimation { duration: 100 } }
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+
+                                    Text {
+                                        id: resText
+                                        anchors.centerIn: parent
+                                        font.family: root.sfFontSemibold
+                                        font.pixelSize: 13
+                                        color: isCurrent ? "#ffffff" : "#e2e8f0"
+                                        text: modelData
+                                        renderType: Text.QtRendering
+                                    }
+
+                                    MouseArea {
+                                        id: resMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (parent.parent.parent.curMon) {
+                                                root.setDisplayResolution(parent.parent.parent.curMon.name, modelData)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 5. Sharing / Topology Section (Extend vs Mirror) - Only visible when ext display connected
+                    ColumnLayout {
+                        id: arrangeSection
+                        Layout.fillWidth: true
+                        spacing: 8
+                        visible: root.displayMonitors.length > 1
+
+                        property var curMon: (root.displayMonitors.length > root.displaySelectedIdx) ? root.displayMonitors[root.displaySelectedIdx] : (root.displayMonitors.length > 0 ? root.displayMonitors[0] : null)
+
+                        Text {
+                            text: "ARRANGEMENT & SHARING"
+                            font.family: root.sfFont
+                            font.pixelSize: 13
+                            font.bold: true
+                            color: "#cbd5e1"
+                            renderType: Text.QtRendering
+                        }
+
+                        // Multi-display: Segmented Control
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: 42
+                            radius: 21
+                            color: "#14ffffff"
+                            border.color: "#25ffffff"
+                            border.width: 1
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.margins: 3
+                                spacing: 3
+
+                                // Extend Segment
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    radius: 18
+                                    color: root.displaySharingMode === "extended" ? "#007aff" : (extMouse.containsMouse ? "#1affffff" : "transparent")
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+
+                                    RowLayout {
+                                        anchors.centerIn: parent
+                                        spacing: 8
+
+                                        Text {
+                                            font.family: root.iconFont
+                                            font.pixelSize: 19
+                                            color: "#ffffff"
+                                            text: "󰹑"
+                                        }
+
+                                        Text {
+                                            font.family: root.sfFontSemibold
+                                            font.pixelSize: 14
+                                            color: "#ffffff"
+                                            text: "Extend Desktop"
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: extMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (parent.parent.parent.parent.curMon) {
+                                                root.setDisplaySharing(parent.parent.parent.parent.curMon.name, "extend")
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Mirror Segment
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    radius: 18
+                                    color: root.displaySharingMode === "mirrored" ? "#007aff" : (mirrMouse.containsMouse ? "#1affffff" : "transparent")
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+
+                                    RowLayout {
+                                        anchors.centerIn: parent
+                                        spacing: 8
+
+                                        Text {
+                                            font.family: root.iconFont
+                                            font.pixelSize: 19
+                                            color: "#ffffff"
+                                            text: "󰍺"
+                                        }
+
+                                        Text {
+                                            font.family: root.sfFontSemibold
+                                            font.pixelSize: 14
+                                            color: "#ffffff"
+                                            text: "Mirror Display"
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: mirrMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (parent.parent.parent.parent.curMon) {
+                                                root.setDisplaySharing(parent.parent.parent.parent.curMon.name, "mirror")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Arrangement & Physical Orientation Button (Expandable, only shown when Extend Desktop is selected)
+                        Rectangle {
+                            visible: root.displaySharingMode === "extended"
+                            Layout.fillWidth: true
+                            implicitHeight: 44
+                            radius: 12
+                            color: arrangeHeaderMouse.containsMouse ? "#26ffffff" : "#16ffffff"
+                            border.color: "#20ffffff"
+                            border.width: 1
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 12
+                                anchors.rightMargin: 12
+                                spacing: 10
+
+                                Text {
+                                    font.family: root.iconFont
+                                    font.pixelSize: 20
+                                    color: "#38bdf8"
+                                    text: "󰹑"
+                                }
+
+                                Text {
+                                    text: "Arrangement and Position"
+                                    font.family: root.sfFontSemibold
+                                    font.pixelSize: 15
+                                    color: "#ffffff"
+                                }
+
+                                Item { Layout.fillWidth: true }
+
+                                Text {
+                                    id: arrangeChevron
+                                    font.family: root.iconFont
+                                    font.pixelSize: 18
+                                    color: "#94a3b8"
+                                    text: "󰅀"
+                                    rotation: root.displayArrangeExpanded ? 180 : 0
+                                    transformOrigin: Item.Center
+                                    Behavior on rotation {
+                                        NumberAnimation {
+                                            duration: 350
+                                            easing.type: Easing.BezierSpline
+                                            easing.bezierCurve: root.springCurve
+                                        }
+                                    }
+                                }
+                            }
+
+                            MouseArea {
+                                id: arrangeHeaderMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.displayArrangeExpanded = !root.displayArrangeExpanded
+                                }
+                            }
+                        }
+
+                        // Expandable Animated Container for Arrangement & Orientation
+                        Item {
+                            id: arrangeExpandContainer
+                            visible: (root.displaySharingMode === "extended") && (root.displayArrangeExpanded || implicitHeight > 0.5)
+                            enabled: root.displayArrangeExpanded
+                            Layout.fillWidth: true
+                            clip: true
+                            implicitHeight: (root.displaySharingMode === "extended" && root.displayArrangeExpanded) ? arrangeContentCol.implicitHeight : 0
+
+                            Behavior on implicitHeight {
+                                NumberAnimation {
+                                    duration: 440
+                                    easing.type: Easing.BezierSpline
+                                    easing.bezierCurve: root.springCurve
+                                }
+                            }
+
+                            ColumnLayout {
+                                id: arrangeContentCol
+                                width: parent.width
+                                y: root.displayArrangeExpanded ? 0 : -14
+                                opacity: root.displayArrangeExpanded ? 1.0 : 0.0
+                                spacing: 12
+
+                                Behavior on y {
+                                    NumberAnimation {
+                                        duration: 440
+                                        easing.type: Easing.BezierSpline
+                                        easing.bezierCurve: root.springCurve
+                                    }
+                                }
+
+                                Behavior on opacity {
+                                    NumberAnimation {
+                                        duration: 280
+                                        easing.type: Easing.OutQuad
+                                    }
+                                }
+
+                                // 1. Placement (Left, Right, Top, Bottom)
+                                ColumnLayout {
+                                    id: placementCol
+                                    Layout.fillWidth: true
+                                    spacing: 6
+
+                                    property bool isInternalSelected: arrangeSection.curMon ? arrangeSection.curMon.isBuiltIn : false
+
+                                    opacity: isInternalSelected ? 0.35 : 1.0
+                                    Behavior on opacity { NumberAnimation { duration: 150 } }
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Text {
+                                            text: "PLACEMENT RELATIVE TO MAIN DISPLAY"
+                                            font.family: root.sfFont
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                            color: "#94a3b8"
+                                            renderType: Text.QtRendering
+                                        }
+
+                                        Item { Layout.fillWidth: true }
+
+                                        Text {
+                                            visible: placementCol.isInternalSelected
+                                            text: "(Fixed Anchor)"
+                                            font.family: root.sfFont
+                                            font.pixelSize: 10
+                                            color: "#64748b"
+                                            renderType: Text.QtRendering
+                                        }
+                                    }
+
+                                    GridLayout {
+                                        Layout.fillWidth: true
+                                        columns: 2
+                                        columnSpacing: 6
+                                        rowSpacing: 6
+
+                                        Repeater {
+                                            model: [
+                                                { id: "left", name: "Left", icon: "󰁍", desc: "Place to the left" },
+                                                { id: "right", name: "Right", icon: "󰁔", desc: "Place to the right" },
+                                                { id: "top", name: "Top / Above", icon: "󰁝", desc: "Place on top" },
+                                                { id: "bottom", name: "Bottom / Below", icon: "󰁅", desc: "Place below" }
+                                            ]
+
+                                            delegate: Rectangle {
+                                                Layout.fillWidth: true
+                                                implicitHeight: 46
+                                                radius: 12
+
+                                                property bool isActive: {
+                                                    var m = arrangeSection.curMon
+                                                    return !placementCol.isInternalSelected && m && (m.arrangement || "right") === modelData.id
+                                                }
+
+                                                color: isActive ? "#26007aff" : ((posMouse.containsMouse && !placementCol.isInternalSelected) ? "#22ffffff" : "#12ffffff")
+                                                border.color: isActive ? "#8060a5fa" : ((posMouse.containsMouse && !placementCol.isInternalSelected) ? "#28ffffff" : "transparent")
+                                                border.width: 1
+
+                                                scale: (posMouse.pressed && !placementCol.isInternalSelected) ? 0.96 : ((posMouse.containsMouse && !placementCol.isInternalSelected) ? 1.02 : 1.0)
+                                                Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
+                                                Behavior on color { ColorAnimation { duration: 150 } }
+                                                Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                                                RowLayout {
+                                                    anchors.fill: parent
+                                                    anchors.leftMargin: 10
+                                                    anchors.rightMargin: 10
+                                                    spacing: 10
+
+                                                    Rectangle {
+                                                        Layout.preferredWidth: 28
+                                                        Layout.preferredHeight: 28
+                                                        radius: 14
+                                                        color: isActive ? "#007aff" : "#20ffffff"
+
+                                                        Text {
+                                                            anchors.centerIn: parent
+                                                            font.family: root.iconFont
+                                                            font.pixelSize: 16
+                                                            color: "#ffffff"
+                                                            text: modelData.icon
+                                                        }
+                                                    }
+
+                                                    ColumnLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 1
+
+                                                        Text {
+                                                            text: modelData.name
+                                                            font.family: root.sfFontMedium
+                                                            font.pixelSize: 13
+                                                            color: "#ffffff"
+                                                            elide: Text.ElideRight
+                                                            Layout.fillWidth: true
+                                                        }
+
+                                                        Text {
+                                                            text: modelData.desc
+                                                            font.family: root.sfFont
+                                                            font.pixelSize: 10
+                                                            color: "#94a3b8"
+                                                            elide: Text.ElideRight
+                                                            Layout.fillWidth: true
+                                                        }
+                                                    }
+                                                }
+
+                                                MouseArea {
+                                                    id: posMouse
+                                                    anchors.fill: parent
+                                                    enabled: !placementCol.isInternalSelected
+                                                    hoverEnabled: !placementCol.isInternalSelected
+                                                    cursorShape: !placementCol.isInternalSelected ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                                    onClicked: {
+                                                        if (!placementCol.isInternalSelected && arrangeSection.curMon) {
+                                                            root.setDisplayArrangement(arrangeSection.curMon.name, modelData.id)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // 2. Physical Orientation (Rotation / Transform)
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+
+                                    Text {
+                                        text: "PHYSICAL ORIENTATION / ROTATION"
+                                        font.family: root.sfFont
+                                        font.pixelSize: 11
+                                        font.bold: true
+                                        color: "#94a3b8"
+                                        renderType: Text.QtRendering
+                                    }
+
+                                    GridLayout {
+                                        Layout.fillWidth: true
+                                        columns: 2
+                                        columnSpacing: 6
+                                        rowSpacing: 6
+
+                                        Repeater {
+                                            model: [
+                                                { transform: 0, name: "Horizontal", icon: "󰹑", desc: "Landscape (0°)" },
+                                                { transform: 1, name: "Vertical", icon: "󰹒", desc: "Portrait (90°)" },
+                                                { transform: 3, name: "Vertical (Inverted)", icon: "󰹒", desc: "Portrait (270°)" },
+                                                { transform: 2, name: "Flipped", icon: "󰹑", desc: "Inverted (180°)" }
+                                            ]
+
+                                            delegate: Rectangle {
+                                                Layout.fillWidth: true
+                                                implicitHeight: 46
+                                                radius: 12
+
+                                                property bool isActive: {
+                                                    var m = arrangeSection.curMon
+                                                    return m && (m.transform || 0) === modelData.transform
+                                                }
+
+                                                color: isActive ? "#26007aff" : (transMouse.containsMouse ? "#22ffffff" : "#12ffffff")
+                                                border.color: isActive ? "#8060a5fa" : (transMouse.containsMouse ? "#28ffffff" : "transparent")
+                                                border.width: 1
+
+                                                scale: transMouse.pressed ? 0.96 : (transMouse.containsMouse ? 1.02 : 1.0)
+                                                Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
+                                                Behavior on color { ColorAnimation { duration: 150 } }
+                                                Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                                                RowLayout {
+                                                    anchors.fill: parent
+                                                    anchors.leftMargin: 10
+                                                    anchors.rightMargin: 10
+                                                    spacing: 10
+
+                                                    Rectangle {
+                                                        Layout.preferredWidth: 28
+                                                        Layout.preferredHeight: 28
+                                                        radius: 14
+                                                        color: isActive ? "#007aff" : "#20ffffff"
+
+                                                        Text {
+                                                            anchors.centerIn: parent
+                                                            font.family: root.iconFont
+                                                            font.pixelSize: 16
+                                                            color: "#ffffff"
+                                                            text: modelData.icon
+                                                        }
+                                                    }
+
+                                                    ColumnLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 1
+
+                                                        Text {
+                                                            text: modelData.name
+                                                            font.family: root.sfFontMedium
+                                                            font.pixelSize: 13
+                                                            color: "#ffffff"
+                                                            elide: Text.ElideRight
+                                                            Layout.fillWidth: true
+                                                        }
+
+                                                        Text {
+                                                            text: modelData.desc
+                                                            font.family: root.sfFont
+                                                            font.pixelSize: 10
+                                                            color: "#94a3b8"
+                                                            elide: Text.ElideRight
+                                                            Layout.fillWidth: true
+                                                        }
+                                                    }
+                                                }
+
+                                                MouseArea {
+                                                    id: transMouse
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: {
+                                                        if (arrangeSection.curMon) {
+                                                            root.setDisplayOrientation(arrangeSection.curMon.name, modelData.transform)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+
+
+                    // 7. Color Profiles (Expandable Menu)
+                    ColumnLayout {
+                        id: colorProfileSection
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        property var curMon: (root.displayMonitors.length > root.displaySelectedIdx) ? root.displayMonitors[root.displaySelectedIdx] : (root.displayMonitors.length > 0 ? root.displayMonitors[0] : null)
+
+                        // Expand / Collapse Header Button
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: 44
+                            radius: 12
+                            color: profHeaderMouse.containsMouse ? "#26ffffff" : "#16ffffff"
+                            border.color: "#20ffffff"
+                            border.width: 1
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 12
+                                anchors.rightMargin: 12
+                                spacing: 10
+
+                                Text {
+                                    font.family: root.iconFont
+                                    font.pixelSize: 20
+                                    color: "#38bdf8"
+                                    text: "󰝤"
+                                }
+
+                                Text {
+                                    text: "Color Profile" + (colorProfileSection.curMon ? (" — " + colorProfileSection.curMon.name) : "")
+                                    font.family: root.sfFontSemibold
+                                    font.pixelSize: 15
+                                    color: "#ffffff"
+                                }
+
+                                Item { Layout.fillWidth: true }
+
+                                Rectangle {
+                                    implicitHeight: 22
+                                    implicitWidth: profBadgeText.implicitWidth + 14
+                                    radius: 11
+                                    color: "#2538bdf8"
+
+                                    Text {
+                                        id: profBadgeText
+                                        anchors.centerIn: parent
+                                        font.family: root.sfFontBold
+                                        font.pixelSize: 11
+                                        color: "#38bdf8"
+                                        text: colorProfileSection.curMon ? (colorProfileSection.curMon.activeProfile || "DEFAULT").toUpperCase() : "DEFAULT"
+                                    }
+                                }
+
+                                Text {
+                                    id: profChevron
+                                    font.family: root.iconFont
+                                    font.pixelSize: 18
+                                    color: "#94a3b8"
+                                    text: "󰅀"
+                                    rotation: root.displayProfilesExpanded ? 180 : 0
+                                    transformOrigin: Item.Center
+                                    Behavior on rotation {
+                                        NumberAnimation {
+                                            duration: 350
+                                            easing.type: Easing.BezierSpline
+                                            easing.bezierCurve: root.springCurve
+                                        }
+                                    }
+                                }
+                            }
+
+                            MouseArea {
+                                id: profHeaderMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.displayProfilesExpanded = !root.displayProfilesExpanded
+                                }
+                            }
+                        }
+
+                        // Expandable Animated Container for Grid of Profiles
+                        Item {
+                            id: profContainer
+                            Layout.fillWidth: true
+                            clip: true
+                            implicitHeight: root.displayProfilesExpanded ? profGrid.implicitHeight : 0
+                            visible: root.displayProfilesExpanded || implicitHeight > 0.5
+                            enabled: root.displayProfilesExpanded
+
+                            Behavior on implicitHeight {
+                                NumberAnimation {
+                                    duration: 440
+                                    easing.type: Easing.BezierSpline
+                                    easing.bezierCurve: root.springCurve
+                                }
+                            }
+
+                            GridLayout {
+                                id: profGrid
+                                width: parent.width
+                                y: root.displayProfilesExpanded ? 0 : -14
+                                opacity: root.displayProfilesExpanded ? 1.0 : 0.0
+                                columns: 2
+                                columnSpacing: 6
+                                rowSpacing: 6
+
+                                Behavior on y {
+                                    NumberAnimation {
+                                        duration: 440
+                                        easing.type: Easing.BezierSpline
+                                        easing.bezierCurve: root.springCurve
+                                    }
+                                }
+
+                                Behavior on opacity {
+                                    NumberAnimation {
+                                        duration: 280
+                                        easing.type: Easing.OutQuad
+                                    }
+                                }
+
+                                Repeater {
+                                    model: [
+                                        { id: "default", name: "Standard / sRGB", icon: "󰝤", desc: "Native Balance" },
+                                        { id: "vivid", name: "Vivid", icon: "󰚌", desc: "Punchy Contrast" },
+                                        { id: "sports", name: "Sports", icon: "󰎢", desc: "High Clarity" },
+                                        { id: "cool", name: "Cool Daylight", icon: "󰜗", desc: "Crisp 7500K" },
+                                        { id: "warm", name: "Warm / Night", icon: "󰖔", desc: "Eye Comfort" },
+                                        { id: "cinema", name: "Cinema", icon: "󰿎", desc: "Filmic Gamma" },
+                                        { id: "greyscale", name: "Greyscale", icon: "󰄰", desc: "Focus Monoc." }
+                                    ]
+
+                                    delegate: Rectangle {
+                                        Layout.fillWidth: true
+                                        implicitHeight: 52
+                                        radius: 12
+
+                                        property bool isActive: colorProfileSection.curMon && colorProfileSection.curMon.activeProfile === modelData.id
+
+                                        color: isActive ? "#26007aff" : (profMouse.containsMouse ? "#22ffffff" : "#12ffffff")
+                                        border.color: isActive ? "#8060a5fa" : (profMouse.containsMouse ? "#28ffffff" : "transparent")
+                                        border.width: 1
+
+                                        scale: profMouse.pressed ? 0.96 : (profMouse.containsMouse ? 1.02 : 1.0)
+                                        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
+                                        Behavior on color { ColorAnimation { duration: 150 } }
+                                        Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 10
+                                            anchors.rightMargin: 10
+                                            spacing: 10
+
+                                            Rectangle {
+                                                Layout.preferredWidth: 32
+                                                Layout.preferredHeight: 32
+                                                radius: 16
+                                                color: isActive ? "#007aff" : "#20ffffff"
+
+                                                Behavior on color { ColorAnimation { duration: 150 } }
+
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    font.family: root.iconFont
+                                                    font.pixelSize: 18
+                                                    color: "#ffffff"
+                                                    text: modelData.icon
+                                                }
+                                            }
+
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 1
+
+                                                Text {
+                                                    text: modelData.name
+                                                    font.family: root.sfFontMedium
+                                                    font.pixelSize: 14
+                                                    color: "#ffffff"
+                                                    elide: Text.ElideRight
+                                                    Layout.fillWidth: true
+                                                }
+
+                                                Text {
+                                                    text: modelData.desc
+                                                    font.family: root.sfFont
+                                                    font.pixelSize: 11
+                                                    color: "#94a3b8"
+                                                    elide: Text.ElideRight
+                                                    Layout.fillWidth: true
+                                                }
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            id: profMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                if (colorProfileSection.curMon) {
+                                                    root.setDisplayProfile(colorProfileSection.curMon.name, modelData.id)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
