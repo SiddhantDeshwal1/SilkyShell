@@ -97,6 +97,7 @@ Item {
         contentHeight: resultsColumn.height
         contentWidth: width
         clip: true
+        boundsBehavior: Flickable.StopAtBounds
 
         Rectangle {
             id: liquidHighlight
@@ -168,6 +169,9 @@ Item {
                                  visible: modelData.iconPath !== undefined
                                  source: modelData.iconPath ? modelData.iconPath : ""
                                  fillMode: Image.PreserveAspectFit
+                                 sourceSize: Qt.size(48, 48)
+                                 asynchronous: true
+                                 cache: true
                                  mipmap: true
                             }
 
@@ -226,15 +230,12 @@ Item {
                         cursorShape: Qt.PointingHandCursor
                         onPositionChanged: {
                             if (root.selectedIndex !== index) {
-                                root.selectedIndex = index
                                 root.resultHovered(index)
                             }
                         }
                         onEntered: {
-                            root.selectedIndex = index
                             root.resultHovered(index)
                         }
-                        onExited: root.resultUnhovered()
                         onClicked: root.resultClicked(modelData)
                     }
                 }

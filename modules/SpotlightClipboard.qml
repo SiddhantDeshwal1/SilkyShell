@@ -271,6 +271,8 @@ Item {
         anchors.bottomMargin: 12
         clip: true
         spacing: 4
+        cacheBuffer: 600
+        boundsBehavior: Flickable.StopAtBounds
 
         model: root.clipboardItems
 

@@ -226,8 +226,8 @@ Item {
 
     PwNodePeakMonitor {
         id: sinkPeakMonitor
-        node: root.sink
-        enabled: root.inCall
+        node: (root.sink && root.sink.ready) ? root.sink : null
+        enabled: root.inCall && !!root.sink && (root.sink.ready ?? false)
         onPeakChanged: {
             root.callOutPeak = Math.max(0, Math.min(1, peak))
             root.callOutBars = root.peakToBars(root.callOutPeak)
@@ -241,8 +241,8 @@ Item {
 
     PwNodePeakMonitor {
         id: micPeakMonitor
-        node: Pipewire.defaultAudioSource
-        enabled: root.inCall
+        node: (Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.ready) ? Pipewire.defaultAudioSource : null
+        enabled: root.inCall && !!Pipewire.defaultAudioSource && (Pipewire.defaultAudioSource.ready ?? false)
         onPeakChanged: {
             root.callMicPeak = Math.max(0, Math.min(1, peak))
             root.callMicBars = root.peakToBars(root.callMicPeak)
@@ -254,7 +254,7 @@ Item {
         let incall = false
         for (let i = 0; i < nodes.length; i++) {
             const n = nodes[i]
-            if (n && n.properties && n.properties["media.role"] === "Communication") {
+            if (n && n.ready && n.properties && n.properties["media.role"] === "Communication") {
                 incall = true
                 break
             }

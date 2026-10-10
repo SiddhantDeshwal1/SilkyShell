@@ -82,10 +82,23 @@ Item {
     }
 
     Timer {
+        id: hoverDwellTimer
+        interval: 150
+        repeat: false
+        onTriggered: {
+            if (barHoverHandler.hovered) {
+                root.hovered = true;
+            }
+        }
+    }
+
+    Timer {
         id: resetStateTimer
         interval: 270
         repeat: false
         onTriggered: {
+            hoverDwellTimer.stop();
+            root.hovered = false;
             root.activeFilter = "";
             root.searchValue = "";
             textInput.text = "";
@@ -101,6 +114,8 @@ Item {
             wasOpen = true;
             focusTimer.start();
         } else {
+            hoverDwellTimer.stop();
+            root.hovered = false;
             resetStateTimer.restart();
         }
     }
@@ -292,6 +307,19 @@ Item {
             layoutDirection: Qt.LeftToRight
             spacing: 16
 
+            HoverHandler {
+                id: barHoverHandler
+                onHoveredChanged: {
+                    if (hovered) {
+                        hoverDwellTimer.restart();
+                    } else {
+                        hoverDwellTimer.stop();
+                        root.hovered = false;
+                        root.hoveredShortcut = -1;
+                    }
+                }
+            }
+
             LiquidGlassBackground {
                 id: searchBarContainer
                 z: 2
@@ -303,15 +331,8 @@ Item {
                 borderWidth: 1.2
                 specularScale: 1.0
 
-                Behavior on width { NumberAnimation { duration: 650; easing.type: Easing.OutCubic } }
+                Behavior on width { NumberAnimation { duration: 455; easing.type: Easing.OutCubic } }
                 Behavior on height { NumberAnimation { duration: 550; easing.type: Easing.OutCubic } }
-
-                MouseArea {
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    acceptedButtons: Qt.NoButton
-                    onEntered: root.hovered = true
-                }
 
                 Item {
                     id: searchInput
@@ -385,14 +406,13 @@ Item {
                                 if (root.hoveredShortcut >= 0 && root.hoveredShortcut < root.shortcuts.length) return "Search " + root.shortcuts[root.hoveredShortcut].label;
                                 if (root.activeFilter === "Apps") return "Search applications...";
                                 if (root.activeFilter === "Clipboard") return "Search clipboard history...";
-                                if (root.hoveredResult >= 0 && root.searchValue !== "" && root.hoveredResult < resultsContainer.results.length) return "Open " + resultsContainer.results[root.hoveredResult].label;
                                 return "Search";
                             }
                             
-                            color: (root.hoveredResult >= 0 && root.searchValue !== "") ? "#ffffff" : "#94a3b8"
+                            color: "#94a3b8"
                             font.family: "SF Pro Text"
                             font.pixelSize: 24
-                            opacity: (root.searchValue.length === 0 || root.hoveredResult >= 0 || root.hoveredShortcut >= 0) ? 1.0 : 0.0
+                            opacity: (root.searchValue.length === 0 || root.hoveredShortcut >= 0) ? 1.0 : 0.0
                             Behavior on opacity { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
                         }
 
@@ -403,7 +423,7 @@ Item {
                             font.family: "SF Pro Text"
                             font.pixelSize: 24
                             color: "#ffffff"
-                            opacity: text.length > 0 && root.hoveredResult < 0 ? 1.0 : 0.0
+                            opacity: text.length > 0 ? 1.0 : 0.0
                             onTextChanged: root.searchValue = text
                             Keys.onPressed: function(event) {
                                 if ((event.modifiers & Qt.MetaModifier) !== 0 || textInput.text.length === 0) {
@@ -523,7 +543,7 @@ Item {
                     width: root.showShortcuts ? 64 : 0
                     height: 64
                     visible: root.showShortcuts || realBubble.opacity > 0.01
-                    Behavior on width { NumberAnimation { duration: 700; easing.type: Easing.OutCubic } }
+                    Behavior on width { NumberAnimation { duration: 490; easing.type: Easing.OutCubic } }
 
                     LiquidGlassBackground {
                         id: realBubble
@@ -558,23 +578,23 @@ Item {
                                     PropertyAction { target: realBubble; property: "x"; value: realBubble.startX }
                                     PropertyAction { target: realBubble; property: "scale"; value: 0.7 }
                                     PropertyAction { target: realBubble; property: "opacity"; value: 1.0 }
-                                    PauseAnimation { duration: index * 75 }
+                                    PauseAnimation { duration: index * 50 }
                                     ParallelAnimation {
-                                        NumberAnimation { target: realBubble; property: "x"; duration: 950; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        NumberAnimation { target: realBubble; property: "scale"; duration: 950; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: realBubble; property: "x"; duration: 665; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: realBubble; property: "scale"; duration: 665; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
                                     }
                                 }
                             },
                             Transition {
                                 from: "hovered"; to: "unhovered"
                                 SequentialAnimation {
-                                    PauseAnimation { duration: index * 80 }
+                                    PauseAnimation { duration: index * 55 }
                                     ParallelAnimation {
-                                        NumberAnimation { target: realBubble; property: "x"; duration: 950; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        NumberAnimation { target: realBubble; property: "scale"; duration: 950; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: realBubble; property: "x"; duration: 665; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: realBubble; property: "scale"; duration: 665; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
                                         SequentialAnimation {
-                                            PauseAnimation { duration: 300 }
-                                            NumberAnimation { target: realBubble; property: "opacity"; to: 0.0; duration: 450; easing.type: Easing.OutQuad }
+                                            PauseAnimation { duration: 210 }
+                                            NumberAnimation { target: realBubble; property: "opacity"; to: 0.0; duration: 315; easing.type: Easing.OutQuad }
                                         }
                                     }
                                     PropertyAction { target: realBubble; property: "x"; value: realBubble.startX }
@@ -609,17 +629,6 @@ Item {
                     }
                 }
             }
-        }
-    }
-
-    MouseArea {
-        anchors.fill: gooeyContainer
-        hoverEnabled: true
-        acceptedButtons: Qt.NoButton
-        onEntered: root.hovered = true
-        onExited: {
-            root.hovered = false
-            root.hoveredShortcut = -1
         }
     }
 }

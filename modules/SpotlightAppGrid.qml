@@ -16,7 +16,8 @@ Item {
     function refreshApps() {
         if (!DesktopEntries || !DesktopEntries.applications) return;
         let raw = [...DesktopEntries.applications.values];
-        root.allApps = raw.filter(a => a && a.name && a.name.length > 0 && !a.noDisplay);
+        root.allApps = raw.filter(a => a && a.name && a.name.length > 0 && !a.noDisplay)
+                          .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
     }
 
     Connections {
@@ -40,29 +41,24 @@ Item {
 
     readonly property var appsList: {
         let q = filterQuery.trim().toLowerCase();
+        if (q === "") return root.allApps;
         let list = [];
         let source = root.allApps;
         for (let i = 0; i < source.length; i++) {
             let app = source[i];
             if (!app || !app.name) continue;
-            if (q === "") {
+            let name = (app.name || "").toLowerCase();
+            let comment = (app.comment || "").toLowerCase();
+            let id = (app.id || "").toLowerCase();
+            let generic = (app.genericName || "").toLowerCase();
+            if (name.indexOf(q) !== -1 || comment.indexOf(q) !== -1 || id.indexOf(q) !== -1 || generic.indexOf(q) !== -1) {
                 list.push(app);
-            } else {
-                let name = (app.name || "").toLowerCase();
-                let comment = (app.comment || "").toLowerCase();
-                let id = (app.id || "").toLowerCase();
-                let generic = (app.genericName || "").toLowerCase();
-                if (name.indexOf(q) !== -1 || comment.indexOf(q) !== -1 || id.indexOf(q) !== -1 || generic.indexOf(q) !== -1) {
-                    list.push(app);
-                }
             }
         }
         list.sort((a, b) => {
-            if (q !== "") {
-                let aStarts = (a.name || "").toLowerCase().startsWith(q) ? 1 : 0;
-                let bStarts = (b.name || "").toLowerCase().startsWith(q) ? 1 : 0;
-                if (aStarts !== bStarts) return bStarts - aStarts;
-            }
+            let aStarts = (a.name || "").toLowerCase().startsWith(q) ? 1 : 0;
+            let bStarts = (b.name || "").toLowerCase().startsWith(q) ? 1 : 0;
+            if (aStarts !== bStarts) return bStarts - aStarts;
             return (a.name || "").localeCompare(b.name || "");
         });
         return list;
@@ -205,6 +201,8 @@ Item {
 
         cellWidth: width / 5
         cellHeight: 128
+        cacheBuffer: 800
+        boundsBehavior: Flickable.StopAtBounds
 
         model: root.appsList
 
@@ -273,8 +271,6 @@ Item {
 
                         scale: root.selectedIndex === index ? 1.08 : (mouseArea.pressed ? 0.95 : 1.0)
                         Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutQuad } }
-                        Behavior on color { ColorAnimation { duration: 150 } }
-                        Behavior on border.color { ColorAnimation { duration: 150 } }
 
                         Image {
                             id: iconImg
@@ -282,6 +278,9 @@ Item {
                             anchors.margins: 5
                             source: Quickshell.iconPath(modelData.icon, true) || (modelData.icon && modelData.icon.startsWith("/") ? ("file://" + modelData.icon) : "")
                             fillMode: Image.PreserveAspectFit
+                            sourceSize: Qt.size(60, 60)
+                            asynchronous: true
+                            cache: true
                             mipmap: true
                             visible: status === Image.Ready
                         }

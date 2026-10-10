@@ -115,8 +115,8 @@ PanelWindow {
     // capture link on the mic node when the user isn't looking at the panel.
     PwNodePeakMonitor {
         id: micPeak
-        node: Pipewire.defaultAudioSource
-        enabled: root.open
+        node: (Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.ready) ? Pipewire.defaultAudioSource : null
+        enabled: root.open && !!Pipewire.defaultAudioSource && (Pipewire.defaultAudioSource.ready ?? false)
     }
 
     // One-shot command runner for wpctl / pw-cli actions.
@@ -131,26 +131,27 @@ PanelWindow {
 
     // ── Node filters ──────────────────────────────────────────────────
     function mediaClass(n) {
-        return (n.properties && n.properties["media.class"]) || ""
+        return (n && n.properties && n.properties["media.class"]) || ""
     }
 
     function getHardwareSources() {
         return Pipewire.nodes.values.filter(function(n) {
-            return !n.isStream && !n.isSink && n.audio !== null
+            return n && !n.isStream && !n.isSink && n.audio !== null
         })
     }
 
     function getRecordingApps() {
         return Pipewire.nodes.values.filter(function(n) {
-            return n.isStream && !n.isSink && n.audio !== null && n.name !== "cava"
+            return n && n.isStream && !n.isSink && n.audio !== null && n.name !== "cava"
         })
     }
 
     function getCameraDevices() {
         return Pipewire.nodes.values.filter(function(n) {
+            if (!n) return false
             const cls = mediaClass(n)
             return cls === "Video/Device" ||
-                   (cls === "Video/Source" && n.properties["media.role"] === "Camera")
+                   (cls === "Video/Source" && n.properties && n.properties["media.role"] === "Camera")
         })
     }
 
@@ -160,6 +161,7 @@ PanelWindow {
     // the portal's screen-share source node (Video/Source).
     function getVideoAppStreams() {
         return Pipewire.nodes.values.filter(function(n) {
+            if (!n) return false
             const cls = mediaClass(n)
             return cls.indexOf("Stream/") === 0 && cls.indexOf("Video") !== -1
         })
@@ -168,6 +170,7 @@ PanelWindow {
     // Display-name fallback for video stream nodes, since many omit
     // application.name (mirrors the audio "apps using mic" row).
     function videoAppName(n) {
+        if (!n) return "App"
         const p = n.properties || {}
         return p["application.name"]
             || p["media.name"]
@@ -183,7 +186,7 @@ PanelWindow {
     function getPortalScreenSource() {
         const re = /xdph|portal|hyprland/i
         return Pipewire.nodes.values.filter(function(n) {
-            return mediaClass(n) === "Video/Source" && re.test(n.name || "")
+            return n && mediaClass(n) === "Video/Source" && re.test(n.name || "")
         })
     }
 
