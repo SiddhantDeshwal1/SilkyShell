@@ -30,11 +30,43 @@ LiquidGlassCard {
     property string laptopStatus: laptopCharging ? "Charging" : "Discharging"
     property bool   laptopCharging: !UPower.onBattery
 
+    // External devices source from ControlCenter or background daemon
+    property var externalDevices: null
+    onExternalDevicesChanged: {
+        if (externalDevices !== null && externalDevices !== undefined) {
+            updateFromDevices(externalDevices)
+        }
+    }
+
+    function updateFromDevices(devicesList) {
+        if (!devicesList) {
+            root.btConnectedDevices = []
+            return
+        }
+        const conn = devicesList.filter(d => d.isConnected)
+        const mapped = conn.map(d => {
+            let iconPath = "file:///home/banana/.config/quickshell/media/icons/bluetooth_white.svg"
+            if (d.iconType === "mouse") iconPath = "file:///home/banana/.config/quickshell/media/icons/mouse_white.svg"
+            else if (d.iconType === "headphones") iconPath = "file:///home/banana/.config/quickshell/media/icons/headphones_white.svg"
+            else if (d.iconType === "keyboard") iconPath = "file:///home/banana/.config/quickshell/media/icons/keyboard_white.svg"
+            else if (d.iconType === "phone") iconPath = "file:///home/banana/.config/quickshell/media/icons/phone_white.svg"
+
+            return {
+                mac: d.mac,
+                name: d.name,
+                battery: parseInt(d.battery) || 0,
+                iconType: d.iconType,
+                iconPath: iconPath
+            }
+        })
+        root.btConnectedDevices = mapped
+    }
+
     // Bluetooth Devices list: [{ name, mac, battery, iconType, iconPath }]
     property var btConnectedDevices: []
     property var _btBuffer: []
 
-    // ── 2. Bluetooth Connected Devices Poller ───────────────────────────
+    // ── 2. Fallback Bluetooth Connected Devices Poller (when standalone) ──
     Process {
         id: btDevicesProc
         command: ["/home/banana/.config/quickshell/scripts/bluetooth-service.py", "get"]
@@ -45,23 +77,7 @@ LiquidGlassCard {
                 if (!trimmed || !trimmed.startsWith("{")) return
                 try {
                     const data = JSON.parse(trimmed)
-                    const conn = (data.devices || []).filter(d => d.isConnected)
-                    const mapped = conn.map(d => {
-                        let iconPath = "file:///home/banana/.config/quickshell/media/icons/bluetooth_white.svg"
-                        if (d.iconType === "mouse") iconPath = "file:///home/banana/.config/quickshell/media/icons/mouse_white.svg"
-                        else if (d.iconType === "headphones") iconPath = "file:///home/banana/.config/quickshell/media/icons/headphones_white.svg"
-                        else if (d.iconType === "keyboard") iconPath = "file:///home/banana/.config/quickshell/media/icons/keyboard_white.svg"
-                        else if (d.iconType === "phone") iconPath = "file:///home/banana/.config/quickshell/media/icons/phone_white.svg"
-
-                        return {
-                            mac: d.mac,
-                            name: d.name,
-                            battery: parseInt(d.battery) || 0,
-                            iconType: d.iconType,
-                            iconPath: iconPath
-                        }
-                    })
-                    root.btConnectedDevices = mapped
+                    root.updateFromDevices(data.devices || [])
                 } catch (e) {}
             }
         }
@@ -69,7 +85,7 @@ LiquidGlassCard {
 
     Timer {
         interval: 4000
-        running: root.visible
+        running: root.externalDevices === null && root.visible
         repeat: true
         triggeredOnStart: true
         onTriggered: {

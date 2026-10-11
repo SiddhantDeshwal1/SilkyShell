@@ -47,6 +47,8 @@ PanelWindow {
     property bool open: false
     onOpenChanged: {
         if (open) {
+            root.refreshStatus()
+            root.refreshScreenTime()
             openRefreshTimer.restart()
         } else {
             openRefreshTimer.stop()
@@ -334,43 +336,67 @@ PanelWindow {
         cmdProc.running = true
     }
 
-    // 1. Wi-Fi Poll & Toggle
+    // 1. Wi-Fi State & Live Stream Backend (network-service.py)
+    function parseWifiJson(jsonStr) {
+        if (!jsonStr || !jsonStr.startsWith("{")) return
+        try {
+            const data = JSON.parse(jsonStr)
+            root.wifiEnabled = !!data.enabled
+            root.wifiConnected = !!data.connected
+            root.wifiSsid = data.ssid || ""
+            root.wifiSignal = parseInt(data.signal) || 0
+        } catch(e) {}
+    }
+
+    // Continuous Live Stream Daemon (runs 24/7, listens to NM + login1 sleep/wake/lid events)
     Process {
-        id: wifiPollProc
-        command: ["sh", "-c", "nmcli -t -f WIFI g; nmcli -t -f active,ssid,signal dev wifi 2>/dev/null | grep '^yes' | head -n 1"]
+        id: wifiStreamProc
+        command: ["python3", "/home/banana/.config/quickshell/scripts/network-service.py", "daemon"]
+        running: true
         stdout: SplitParser {
-            onRead: function(line) {
-                const trimmed = line.trim()
-                if (trimmed === "enabled") {
-                    root.wifiEnabled = true
-                } else if (trimmed === "disabled") {
-                    root.wifiEnabled = false
-                    root.wifiConnected = false
-                    root.wifiSsid = ""
-                } else if (trimmed.startsWith("yes:")) {
-                    const parts = trimmed.split(":")
-                    if (parts.length >= 3) {
-                        root.wifiConnected = true
-                        root.wifiSsid = parts[1] || "Connected"
-                        root.wifiSignal = parseInt(parts[2]) || 70
-                    }
-                }
-            }
+            splitMarker: "\n"
+            onRead: function(line) { root.parseWifiJson(line.trim()) }
         }
+        onExited: function() {
+            wifiStreamRestartTimer.restart()
+        }
+    }
+
+    Timer {
+        id: wifiStreamRestartTimer
+        interval: 1000
+        repeat: false
+        onTriggered: {
+            if (!wifiStreamProc.running) wifiStreamProc.running = true
+        }
+    }
+
+    // Fast one-shot state reader
+    Process {
+        id: wifiStateProc
+        command: ["python3", "/home/banana/.config/quickshell/scripts/network-service.py", "get"]
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) { root.parseWifiJson(line.trim()) }
+        }
+    }
+
+    function refreshWifi() {
+        if (!wifiStateProc.running) wifiStateProc.running = true
     }
 
     function toggleWifi() {
         if (wifiEnabled) {
-            runShell("nmcli radio wifi off")
+            runShell("/home/banana/.config/quickshell/scripts/network-service.py radio-off &")
             wifiEnabled = false
             wifiConnected = false
             wifiSsid = ""
             wifiNetworks = []
             wifiPasswordPromptOpen = false
         } else {
-            runShell("nmcli radio wifi on")
+            runShell("/home/banana/.config/quickshell/scripts/network-service.py radio-on &")
             wifiEnabled = true
-            wifiPollTimer.restart()
+            refreshWifi()
             if (currentView === "wifi") scanWifi(false)
         }
     }
@@ -388,34 +414,20 @@ PanelWindow {
     // Wi-Fi Fast Non-Blocking Scanner
     Process {
         id: wifiScanProc
-        command: ["sh", "-c", "nmcli -t -f active,ssid,signal,security dev wifi list --rescan no 2>/dev/null"]
         stdout: SplitParser {
             splitMarker: "\n"
             onRead: function(line) {
-                const trimmed = line.trim()
-                if (!trimmed) return
-                const parts = trimmed.split(":")
-                if (parts.length < 4) return
-                const isActive = parts[0] === "yes"
-                const ssid = parts[1]
-                if (!ssid) return
-                const signal = parseInt(parts[2]) || 50
-                const security = parts[3] || ""
-                const isSecured = security !== "" && security !== "--"
-
-                const existingIdx = root._wifiScanBuffer.findIndex(n => n.ssid === ssid)
-                if (existingIdx >= 0) {
-                    if (signal > root._wifiScanBuffer[existingIdx].signal || isActive) {
-                        root._wifiScanBuffer[existingIdx] = { ssid, signal, isSecured, isActive }
+                const tr = line.trim()
+                if (!tr || !tr.startsWith("[")) return
+                try {
+                    const nets = JSON.parse(tr)
+                    if (Array.isArray(nets)) {
+                        root.wifiNetworks = nets
                     }
-                } else {
-                    root._wifiScanBuffer.push({ ssid, signal, isSecured, isActive })
-                }
+                } catch(e) {}
             }
         }
         onExited: function() {
-            root._wifiScanBuffer.sort((a, b) => (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0) || b.signal - a.signal)
-            root.wifiNetworks = root._wifiScanBuffer.slice()
             if (!wifiMinSpinTimer.running) {
                 root.wifiScanning = false
             }
@@ -426,12 +438,7 @@ PanelWindow {
         if (!wifiEnabled) return
         root.wifiScanning = true
         wifiMinSpinTimer.restart()
-        root._wifiScanBuffer = []
-        if (forceRescan) {
-            wifiScanProc.command = ["sh", "-c", "nmcli dev wifi rescan 2>/dev/null; sleep 0.4; nmcli -t -f active,ssid,signal,security dev wifi list --rescan no 2>/dev/null"]
-        } else {
-            wifiScanProc.command = ["sh", "-c", "nmcli -t -f active,ssid,signal,security dev wifi list --rescan no 2>/dev/null"]
-        }
+        wifiScanProc.command = ["python3", "/home/banana/.config/quickshell/scripts/network-service.py", forceRescan ? "rescan" : "scan"]
         wifiScanProc.running = true
     }
 
@@ -493,7 +500,7 @@ PanelWindow {
     }
 
     function disconnectWifi() {
-        runShell("nmcli dev disconnect $(nmcli -t -f DEVICE,TYPE dev 2>/dev/null | grep ':wifi$' | cut -d: -f1 | head -n 1) &")
+        runShell("/home/banana/.config/quickshell/scripts/network-service.py disconnect &")
         root.wifiConnected = false
         root.wifiSsid = ""
         scanWifi(false)
@@ -547,23 +554,36 @@ PanelWindow {
     // One-shot state reader
     Process {
         id: btStateProc
-        command: ["/home/banana/.config/quickshell/scripts/bluetooth-service.py", "get"]
+        command: ["python3", "/home/banana/.config/quickshell/scripts/bluetooth-service.py", "get"]
         stdout: SplitParser {
             splitMarker: "\n"
             onRead: function(line) { root.parseBtJson(line.trim()) }
         }
     }
 
-    // Continuous Live Stream & Discovery Daemon (runs while Bluetooth menu is open)
+    // Continuous Live Stream Daemon (runs 24/7, listens to BlueZ + login1 sleep/wake/lid events)
     Process {
         id: btStreamProc
-        command: ["/home/banana/.config/quickshell/scripts/bluetooth-service.py", "stream"]
+        command: ["python3", "/home/banana/.config/quickshell/scripts/bluetooth-service.py", "daemon"]
+        running: true
         stdout: SplitParser {
             splitMarker: "\n"
             onRead: function(line) {
                 root.parseBtJson(line.trim())
                 if (!btMinSpinTimer.running) root.btScanning = false
             }
+        }
+        onExited: function() {
+            btStreamRestartTimer.restart()
+        }
+    }
+
+    Timer {
+        id: btStreamRestartTimer
+        interval: 1000
+        repeat: false
+        onTriggered: {
+            if (!btStreamProc.running) btStreamProc.running = true
         }
     }
 
@@ -593,7 +613,7 @@ PanelWindow {
         } else {
             root.btPowered = true
             runShell("/home/banana/.config/quickshell/scripts/bluetooth-service.py power-on &")
-            btPollTimer.restart()
+            refreshBluetooth()
             if (currentView === "bluetooth") {
                 scanBluetooth()
             }
@@ -613,17 +633,13 @@ PanelWindow {
         if (!btPowered) return
         root.btScanning = true
         btMinSpinTimer.restart()
-        if (!btStreamProc.running) {
-            btStreamProc.running = true
-        }
+        runShell("/home/banana/.config/quickshell/scripts/bluetooth-service.py scan-on &")
         refreshBluetooth()
     }
 
     function stopBluetoothScan() {
         root.btScanning = false
-        if (btStreamProc.running) {
-            btStreamProc.running = false
-        }
+        runShell("/home/banana/.config/quickshell/scripts/bluetooth-service.py scan-off &")
     }
 
     function connectBluetooth(mac) {
@@ -747,8 +763,8 @@ PanelWindow {
     }
 
     function refreshStatus() {
-        wifiPollProc.running = true
-        btStateProc.running = true
+        refreshWifi()
+        refreshBluetooth()
         brightProc.running = true
         root.refreshDisplays()
     }
@@ -827,9 +843,9 @@ PanelWindow {
         displayActionProc.running = true
     }
 
-    // Polling Timers
-    Timer { id: wifiPollTimer; interval: 6000; running: root.open; repeat: true; onTriggered: wifiPollProc.running = true }
-    Timer { id: btPollTimer; interval: 6000; running: root.open && root.currentView !== "bluetooth"; repeat: true; onTriggered: refreshBluetooth() }   // exempt BT view — btStreamProc handles real-time updates there
+    // Safety sync timers
+    Timer { id: wifiPollTimer; interval: 8000; running: root.open; repeat: true; onTriggered: refreshWifi() }
+    Timer { id: btPollTimer; interval: 8000; running: root.open; repeat: true; onTriggered: refreshBluetooth() }
     Timer { id: btQuickPollTimer; interval: 700; repeat: false; onTriggered: refreshBluetooth() }
     Timer { id: scanTimer; interval: 1500; repeat: false; onTriggered: scanWifi(false) }
     Timer { id: btScanTimer; interval: 1500; repeat: false; onTriggered: scanBluetooth() }
@@ -1634,6 +1650,7 @@ PanelWindow {
                 // 2.1 Left: 2x2 Connected Devices Battery Widget (182x156)
                 ConnectedDevicesWidget {
                     id: devicesWidget
+                    externalDevices: root.btDevices
                     Layout.preferredWidth: 182
                     Layout.preferredHeight: 156
 
@@ -4871,7 +4888,7 @@ PanelWindow {
                                     implicitWidth: resText.implicitWidth + 20
                                     radius: 15
 
-                                    property bool isCurrent: parent.parent.parent.curMon && parent.parent.parent.curMon.currentResolution === modelData
+                                    property bool isCurrent: Boolean(parent && parent.parent && parent.parent.parent && parent.parent.parent.curMon && parent.parent.parent.curMon.currentResolution === modelData)
 
                                     color: isCurrent ? "#007aff" : (resMouse.containsMouse ? "#28ffffff" : "#14ffffff")
                                     border.color: isCurrent ? "#80ffffff" : "#20ffffff"

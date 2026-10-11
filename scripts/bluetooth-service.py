@@ -323,10 +323,39 @@ def set_audio_profile(card, profile):
     except Exception as e:
         print(json.dumps({"status": "error", "card": card, "error": str(e)}))
 
-def run_stream_daemon():
+def start_discovery():
+    bus = get_dbus_system()
+    adapter, _ = get_adapter(bus)
+    if adapter:
+        try:
+            iface = dbus.Interface(adapter, "org.bluez.Adapter1")
+            iface.StartDiscovery()
+            print(json.dumps({"status": "discovery_started"}))
+            return
+        except Exception:
+            pass
+    subprocess.run(["bluetoothctl", "scan", "on"], capture_output=True)
+    print(json.dumps({"status": "discovery_started"}))
+
+def stop_discovery():
+    bus = get_dbus_system()
+    adapter, _ = get_adapter(bus)
+    if adapter:
+        try:
+            iface = dbus.Interface(adapter, "org.bluez.Adapter1")
+            iface.StopDiscovery()
+            print(json.dumps({"status": "discovery_stopped"}))
+            return
+        except Exception:
+            pass
+    subprocess.run(["bluetoothctl", "scan", "off"], capture_output=True)
+    print(json.dumps({"status": "discovery_stopped"}))
+
+def run_stream_daemon(active_discovery=False):
     """
     Runs a persistent D-Bus listener with a registered BlueZ Pairing Agent,
-    keeping active Discovery alive and streaming state events in real time.
+    handling pairing requests, streaming state events in real time, and
+    reacting instantly to device changes, adapter power, and sleep/resume events.
     """
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
@@ -341,24 +370,28 @@ def run_stream_daemon():
     except Exception:
         pass
 
-    # Start Discovery
+    # Optional active discovery
     adapter_obj, _ = get_adapter(bus)
-    if adapter_obj:
+    if active_discovery and adapter_obj:
         try:
             iface = dbus.Interface(adapter_obj, "org.bluez.Adapter1")
             iface.StartDiscovery()
-        except dbus.DBusException as e:
+        except dbus.DBusException:
             pass
 
     loop = GLib.MainLoop()
+    last_state = [None]
     pending_emit = [False]
 
-    def emit_state():
+    def emit_state(force=False):
         pending_emit[0] = False
         try:
             st = get_full_state(bus)
-            sys.stdout.write(json.dumps(st) + "\n")
-            sys.stdout.flush()
+            encoded = json.dumps(st)
+            if force or encoded != last_state[0]:
+                last_state[0] = encoded
+                sys.stdout.write(encoded + "\n")
+                sys.stdout.flush()
         except Exception:
             pass
         return False
@@ -366,12 +399,12 @@ def run_stream_daemon():
     def schedule_emit():
         if not pending_emit[0]:
             pending_emit[0] = True
-            GLib.timeout_add(120, emit_state)
+            GLib.timeout_add(100, lambda: emit_state(force=False))
 
     # Initial emit
-    emit_state()
+    emit_state(force=True)
 
-    # D-Bus Signal Listeners
+    # BlueZ Signal Listeners
     bus.add_signal_receiver(
         lambda *args, **kwargs: schedule_emit(),
         signal_name="InterfacesAdded",
@@ -391,11 +424,60 @@ def run_stream_daemon():
         bus_name="org.bluez"
     )
 
+    # systemd-logind Sleep/Wake & Lid integration
+    def on_sleep_changed(sleeping):
+        if sleeping:
+            # Suspending / lid closed: clear connected status immediately
+            try:
+                st = get_full_state(bus)
+                st["connectedDevice"] = ""
+                for d in st.get("devices", []):
+                    d["isConnected"] = False
+                    d["state"] = "paired" if d.get("isPaired") else "available"
+                st["audioCard"] = None
+                last_state[0] = json.dumps(st)
+                sys.stdout.write(last_state[0] + "\n")
+                sys.stdout.flush()
+            except Exception:
+                pass
+        else:
+            # Resumed / lid opened: immediate query + scheduled checks for reconnection
+            emit_state(force=True)
+            for delay in [500, 1500, 3000, 5500]:
+                GLib.timeout_add(delay, lambda: (emit_state(force=False), False)[1])
+
+    def on_login1_prop_changed(iface, changed, invalidated):
+        if "LidClosed" in changed:
+            lid_closed = bool(changed["LidClosed"])
+            if not lid_closed:
+                # Lid opened!
+                emit_state(force=True)
+                for delay in [500, 1500, 3000, 5500]:
+                    GLib.timeout_add(delay, lambda: (emit_state(force=False), False)[1])
+        if "PreparingForSleep" in changed:
+            on_sleep_changed(bool(changed["PreparingForSleep"]))
+
+    try:
+        bus.add_signal_receiver(
+            on_sleep_changed,
+            signal_name="PrepareForSleep",
+            dbus_interface="org.freedesktop.login1.Manager",
+            bus_name="org.freedesktop.login1"
+        )
+        bus.add_signal_receiver(
+            on_login1_prop_changed,
+            signal_name="PropertiesChanged",
+            dbus_interface="org.freedesktop.DBus.Properties",
+            bus_name="org.freedesktop.login1"
+        )
+    except Exception:
+        pass
+
     # Periodic heartbeat to catch pactl card or battery changes
-    GLib.timeout_add_seconds(3, lambda: (emit_state(), True)[1])
+    GLib.timeout_add_seconds(3, lambda: (emit_state(force=False), True)[1])
 
     def sig_handler(*args):
-        if adapter_obj:
+        if active_discovery and adapter_obj:
             try:
                 iface = dbus.Interface(adapter_obj, "org.bluez.Adapter1")
                 iface.StopDiscovery()
@@ -419,8 +501,14 @@ def main():
 
     cmd = sys.argv[1]
 
-    if cmd in ["stream", "daemon", "scan"]:
-        run_stream_daemon()
+    if cmd in ["daemon", "stream"]:
+        run_stream_daemon(active_discovery=False)
+    elif cmd == "scan":
+        run_stream_daemon(active_discovery=True)
+    elif cmd == "scan-on":
+        start_discovery()
+    elif cmd == "scan-off":
+        stop_discovery()
     elif cmd == "power-on":
         set_power(True)
         print(json.dumps({"status": "powered_on"}))

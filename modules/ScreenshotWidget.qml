@@ -10,12 +10,14 @@ import Quickshell.Wayland
 // ScreenshotWidget — Native Quickshell Screenshot Engine & Liquid Preview Hub
 //
 // Root-Cause Fix Applied:
-//   - Root dimensions (root.width / root.height) evaluate to 0 before a LayerShell
-//     surface is configured by the compositor on the first capture.
-//   - Replaced dynamic unmapped dimensions with guaranteed monitor bounds
-//     via `Screen.width` / `Screen.height`, with explicit animation target
-//     re-anchoring in triggerScreenshot().
-//   - Eliminates the upper-left (0,0) flight trajectory glitch completely.
+//   - Root dimensions (root.width / root.height) default to 100x100 in Qt before a
+//     LayerShell surface is configured by the compositor.
+//   - Using (root.width > 0) caused screenWidth/screenHeight to evaluate to 100x100,
+//     which led targetDockX/Y to evaluate to negative values (-214, -120), flying
+//     to the upper-left (0,0) corner.
+//   - Replaced with guaranteed monitor bounds via `root.screen` / `Screen.width`
+//     and guarded against the 100x100 default.
+//   - Eliminates the upper-left flight trajectory glitch completely.
 // ─────────────────────────────────────────────────────────────────────────────
 
 PanelWindow {
@@ -27,9 +29,9 @@ PanelWindow {
     readonly property string sfFontSemibold: "SF Pro Rounded"
     readonly property string iconFont: "JetBrainsMono NFP"
 
-    // Guaranteed screen dimensions (always non-zero, even before LayerShell configuration)
-    readonly property real screenWidth: (root.width > 0) ? root.width : (Screen.width > 0 ? Screen.width : 1920)
-    readonly property real screenHeight: (root.height > 0) ? root.height : (Screen.height > 0 ? Screen.height : 1080)
+    // Guaranteed screen dimensions (uses monitor bounds; avoids Qt's unmapped window 100x100 default)
+    readonly property real screenWidth: (root.screen && root.screen.width > 0) ? root.screen.width : (root.width > 100 ? root.width : (Screen.width > 0 ? Screen.width : 1920))
+    readonly property real screenHeight: (root.screen && root.screen.height > 0) ? root.screen.height : (root.height > 100 ? root.height : (Screen.height > 0 ? Screen.height : 1080))
 
     // State properties
     property bool isActive: false
