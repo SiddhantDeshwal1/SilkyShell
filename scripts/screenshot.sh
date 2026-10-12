@@ -21,13 +21,31 @@ case "$mode" in
         filename="${save_dir}/Screenshot_${timestamp}.png"
         autoSaved="true"
 
-        grim "$filename" || exit 1
+        mon_name=""
         if command -v hyprctl &>/dev/null; then
-            mon_info=$(hyprctl monitors -j 2>/dev/null | grep -E '"(width|height)"' | head -n 2 | awk -F': ' '{print $2}' | tr -d ',')
-            if [ -n "$mon_info" ]; then
-                W=$(echo "$mon_info" | head -n 1)
-                H=$(echo "$mon_info" | tail -n 1)
+            if command -v jq &>/dev/null; then
+                focused_mon=$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.focused == true)')
+                if [ -n "$focused_mon" ]; then
+                    mon_name=$(echo "$focused_mon" | jq -r '.name')
+                    X=$(echo "$focused_mon" | jq -r '.x')
+                    Y=$(echo "$focused_mon" | jq -r '.y')
+                    W=$(echo "$focused_mon" | jq -r '.width')
+                    H=$(echo "$focused_mon" | jq -r '.height')
+                fi
             fi
+            if [ -z "$mon_name" ]; then
+                mon_info=$(hyprctl monitors -j 2>/dev/null | grep -E '"(width|height)"' | head -n 2 | awk -F': ' '{print $2}' | tr -d ',')
+                if [ -n "$mon_info" ]; then
+                    W=$(echo "$mon_info" | head -n 1)
+                    H=$(echo "$mon_info" | tail -n 1)
+                fi
+            fi
+        fi
+
+        if [ -n "$mon_name" ]; then
+            grim -o "$mon_name" "$filename" || grim "$filename" || exit 1
+        else
+            grim "$filename" || exit 1
         fi
         ;;
     --win|--window)

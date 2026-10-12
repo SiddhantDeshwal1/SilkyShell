@@ -153,21 +153,61 @@ PanelWindow {
         root.fileDir = rawPath.substring(0, rawPath.lastIndexOf("/"))
         root.autoSaved = !!data.autoSaved
 
-        // Guaranteed screen dimensions
-        const sW = root.screenWidth
-        const sH = root.screenHeight
-        const targetDockX = sW - root.dockW - root.dockMargin
-        const targetDockY = sH - root.dockH - root.dockMargin
-
-        // Parse capture geometry
+        // Parse capture geometry (which may be in global Wayland compositor coordinates)
         const capX = Number(data.x)
         const capY = Number(data.y)
         const capW = Number(data.w)
         const capH = Number(data.h)
 
+        // Find which screen contains the capture
+        const testX = !isNaN(capX) ? capX + (!isNaN(capW) && capW > 0 ? capW / 2 : 0) : 0
+        const testY = !isNaN(capY) ? capY + (!isNaN(capH) && capH > 0 ? capH / 2 : 0) : 0
+
+        let targetScreen = null
+        if (Quickshell.screens && Quickshell.screens.length > 0) {
+            for (let i = 0; i < Quickshell.screens.length; i++) {
+                const s = Quickshell.screens[i]
+                if (testX >= s.x && testX < (s.x + s.width) &&
+                    testY >= s.y && testY < (s.y + s.height)) {
+                    targetScreen = s
+                    break
+                }
+            }
+            if (!targetScreen) {
+                for (let i = 0; i < Quickshell.screens.length; i++) {
+                    const s = Quickshell.screens[i]
+                    if (capX >= s.x && capX < (s.x + s.width) &&
+                        capY >= s.y && capY < (s.y + s.height)) {
+                        targetScreen = s
+                        break
+                    }
+                }
+            }
+            if (!targetScreen) {
+                targetScreen = Quickshell.screens[0]
+            }
+        }
+
+        if (targetScreen) {
+            root.screen = targetScreen
+        }
+
+        // Guaranteed screen dimensions for the target monitor
+        const sW = (targetScreen && targetScreen.width > 0) ? targetScreen.width : root.screenWidth
+        const sH = (targetScreen && targetScreen.height > 0) ? targetScreen.height : root.screenHeight
+        const targetDockX = sW - root.dockW - root.dockMargin
+        const targetDockY = sH - root.dockH - root.dockMargin
+
+        // Convert global compositor coordinates to target screen local coordinates
+        const screenOffsetX = targetScreen ? targetScreen.x : 0
+        const screenOffsetY = targetScreen ? targetScreen.y : 0
+
+        const localCapX = capX - screenOffsetX
+        const localCapY = capY - screenOffsetY
+
         if (!isNaN(capW) && capW > 10 && !isNaN(capH) && capH > 10) {
-            root.sourceX = !isNaN(capX) ? capX : (sW - capW) / 2
-            root.sourceY = !isNaN(capY) ? capY : (sH - capH) / 2
+            root.sourceX = !isNaN(localCapX) ? localCapX : (sW - capW) / 2
+            root.sourceY = !isNaN(localCapY) ? localCapY : (sH - capH) / 2
             root.sourceW = capW
             root.sourceH = capH
         } else {
