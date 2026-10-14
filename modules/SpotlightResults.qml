@@ -20,7 +20,7 @@ Item {
 
     signal resultHovered(int index)
     signal resultUnhovered()
-    signal resultClicked(var result)
+    signal resultClicked(var result, bool isTerminal)
     
     property int selectedIndex: -1
     property real targetContentY: 0
@@ -77,8 +77,12 @@ Item {
         easing.type: Easing.OutQuad
     }
 
-    // Auto-calculate height based on content or max 384px (h-96)
-    property real contentHeightPixels: (root.results && root.results.length > 0) ? Math.min(resultsColumn.height, 384) : 0
+    // Auto-calculate height cleanly matching whole items up to 6 items (max 420px)
+    property real contentHeightPixels: {
+        if (!root.results || root.results.length === 0) return 0;
+        let count = Math.min(root.results.length, 6);
+        return resultsColumn.topPadding + resultsColumn.bottomPadding + (count * 66);
+    }
     width: parent.width
     height: contentHeightPixels
     clip: true
@@ -127,7 +131,7 @@ Item {
             id: resultsColumn
             width: parent.width
             topPadding: 8
-            bottomPadding: 8
+            bottomPadding: 16
             leftPadding: 8
             rightPadding: 8
             spacing: 0
@@ -161,7 +165,7 @@ Item {
                             border.width: 1
                             antialiasing: true
                             scale: root.selectedIndex === index ? 1.08 : 1.0
-                            Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutQuad } }
+                            Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutBack; easing.overshoot: 1.25 } }
                             
                             Image {
                                  anchors.fill: parent
@@ -236,7 +240,10 @@ Item {
                         onEntered: {
                             root.resultHovered(index)
                         }
-                        onClicked: root.resultClicked(modelData)
+                        onClicked: function(mouse) {
+                            let isAlt = (mouse.modifiers & Qt.AltModifier) !== 0;
+                            root.resultClicked(modelData, isAlt);
+                        }
                     }
                 }
             }

@@ -39,7 +39,7 @@ PanelWindow {
         onTriggered: {
             if (root.open) {
                 root.refreshStatus()
-                root.refreshScreenTime()
+                root.refreshPowerMode()
             }
         }
     }
@@ -48,7 +48,7 @@ PanelWindow {
     onOpenChanged: {
         if (open) {
             root.refreshStatus()
-            root.refreshScreenTime()
+            root.refreshPowerMode()
             openRefreshTimer.restart()
         } else {
             openRefreshTimer.stop()
@@ -57,46 +57,86 @@ PanelWindow {
 
     Component.onCompleted: {
         refreshStatus()
-        refreshScreenTime()
+        refreshPowerMode()
         refreshDisplays()
     }
 
-    property string currentView: "main" // "main" | "wifi" | "bluetooth" | "sound" | "screentime" | "display"
+    property string currentView: "main" // "main" | "wifi" | "bluetooth" | "sound" | "power" | "display"
     property bool dndActive: false
     property bool darkModeActive: Theme.darkMode
     property bool nightLightActive: false
 
-    // ── Screen Time State ─────────────────────────────────────────────
-    property int    screenTimeTotalSec: 0
-    property string screenTimeTotalFormatted: "0m"
-    property var    screenTimeApps: []
+    // ── Power Mode State ──────────────────────────────────────────────
+    // ── Power Mode State ──────────────────────────────────────────────
+    property string powerActiveMode: "balanced"
+    property string powerWattage: "15W"
+    property string powerGovernor: "schedutil"
+    property string powerScheduler: "scx_rusty"
+    property string powerTemp: "90°C"
 
-    // Background Screen Time Daemon
-    Process {
-        id: screentimeDaemonProc
-        command: ["python3", "/home/banana/.config/quickshell/scripts/screentime.py", "daemon"]
-        running: true
-    }
-
-    FileView {
-        id: stFileWatcher
-        path: "/home/banana/.cache/quickshell/screentime.json"
-        watchChanges: true
-        onFileChanged: root.refreshScreenTime()
-    }
-
-    function refreshScreenTime() {
+    function parsePowerJson(jsonStr) {
+        if (!jsonStr || !jsonStr.startsWith("{")) return
         try {
-            const text = stFileWatcher.text()
-            if (text && text.trim() !== "") {
-                const obj = JSON.parse(text.trim())
-                if (obj) {
-                    root.screenTimeTotalSec = obj.totalSeconds || 0
-                    root.screenTimeTotalFormatted = obj.totalFormatted || "0m"
-                    root.screenTimeApps = obj.apps || []
-                }
+            const obj = JSON.parse(jsonStr)
+            if (obj && obj.mode) {
+                root.powerActiveMode = obj.mode
+                root.powerWattage = obj.wattage || "15W"
+                root.powerGovernor = obj.governor || "schedutil"
+                root.powerScheduler = obj.scheduler || "scx_rusty"
+                root.powerTemp = obj.temp || "90°C"
             }
         } catch(e) {}
+    }
+
+    // 1. One-shot live state reader (fast, reliable, authoritative)
+    Process {
+        id: powerGetProc
+        command: ["python3", "/home/banana/.config/quickshell/scripts/power-service.py", "get"]
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) { root.parsePowerJson(line.trim()) }
+        }
+    }
+
+    // 2. Continuous Live Stream Daemon (listens to sleep/wake/lid events & updates live)
+    Process {
+        id: powerStreamProc
+        command: ["python3", "/home/banana/.config/quickshell/scripts/power-service.py", "daemon"]
+        running: true
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) { root.parsePowerJson(line.trim()) }
+        }
+    }
+
+    function refreshPowerMode() {
+        if (!powerGetProc.running) {
+            powerGetProc.running = true
+        }
+    }
+
+    // 3. Mode Setter Process
+    Process {
+        id: pwrSetProc
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) { root.parsePowerJson(line.trim()) }
+        }
+        onExited: function(code, status) {
+            root.refreshPowerMode()
+        }
+    }
+
+    function setPowerMode(m) {
+        root.powerActiveMode = m
+        switch(m) {
+            case "peak":         root.powerWattage = "35W"; root.powerTemp = "100°C"; break;
+            case "performance":  root.powerWattage = "30W"; root.powerTemp = "100°C"; break;
+            case "balanced":     root.powerWattage = "15W"; root.powerTemp = "90°C";  break;
+            case "batterysaver": root.powerWattage = "10W"; root.powerTemp = "80°C";  break;
+        }
+        pwrSetProc.command = ["python3", "/home/banana/.config/quickshell/scripts/power-service.py", "set", m]
+        pwrSetProc.running = true
     }
 
     // ── Wi-Fi State ───────────────────────────────────────────────────
@@ -210,9 +250,14 @@ PanelWindow {
         function openWifi() { root.open = true; root.openWifiMenu() }
         function openBluetooth() { root.open = true; root.openBluetoothMenu() }
         function openSound() { root.open = true; root.openSoundMenu() }
-        function openScreenTime() { root.open = true; root.openScreenTimeMenu() }
+        function openPower() { root.open = true; root.openPowerMenu() }
+        function openScreenTime() { root.open = true; root.openPowerMenu() }
+        function setPowerMode(m: string) { root.setPowerMode(m) }
         function openDisplay() { root.open = true; root.openDisplayMenu() }
         function goBack() { root.goBack() }
+        property string activePowerMode: root.powerActiveMode
+        property string activePowerWattage: root.powerWattage
+        function refreshPowerMode() { root.refreshPowerMode() }
         function toggleDnd() { root.dndActive = !root.dndActive }
         function toggleDarkMode() { Theme.toggleDarkMode() }
     }
@@ -288,13 +333,17 @@ PanelWindow {
         root.runShell("quickshell ipc call notifications close &")
     }
 
-    function openScreenTimeMenu() {
+    function openPowerMenu() {
         if (currentView === "bluetooth") stopBluetoothScan()
-        root.setupMenuOrigin(screenTimeMenuCard, stCard, 97, -73, 0.511, 0.184, 190)
+        root.setupMenuOrigin(powerMenuCard, pwrCard, 97, -73, 0.511, 0.184, 190)
         open = true
-        currentView = "screentime"
-        refreshScreenTime()
+        currentView = "power"
+        refreshPowerMode()
         root.runShell("quickshell ipc call notifications close &")
+    }
+
+    function openScreenTimeMenu() {
+        openPowerMenu()
     }
 
     function openDisplayMenu() {
@@ -725,10 +774,10 @@ PanelWindow {
                         root._curBrightnessRead = 1
                     } else {
                         root._maxBrightness = Math.max(1, val)
-                        root.brightnessLevel = Math.max(0.05, Math.min(1.0, root._rawBrightness / root._maxBrightness))
+                        root.brightnessLevel = Math.max(0.0, Math.min(1.0, root._rawBrightness / root._maxBrightness))
                     }
                 } else {
-                    root.brightnessLevel = Math.max(0.05, Math.min(1.0, val / root._maxBrightness))
+                    root.brightnessLevel = Math.max(0.0, Math.min(1.0, val / root._maxBrightness))
                 }
             }
         }
@@ -747,7 +796,7 @@ PanelWindow {
                     const pctStr = parts[3].replace("%", "").trim()
                     const pct = parseInt(pctStr)
                     if (!isNaN(pct)) {
-                        root.brightnessLevel = Math.max(0.05, Math.min(1.0, pct / 100.0))
+                        root.brightnessLevel = Math.max(0.0, Math.min(1.0, pct / 100.0))
                     }
                 }
             }
@@ -755,10 +804,11 @@ PanelWindow {
     }
 
     function setBrightness(level) {
-        const clamped = Math.max(0.05, Math.min(1.0, level))
+        const clamped = Math.max(0.0, Math.min(1.0, level))
         root.brightnessLevel = clamped
         const val = Math.round(clamped * 100)
-        brightSetProc.command = ["brightnessctl", "s", val + "%"]
+        brightSetProc.running = false
+        brightSetProc.command = ["python3", "/home/banana/.config/quickshell/scripts/brightness-control.py", "set", val.toString()]
         brightSetProc.running = true
     }
 
@@ -893,7 +943,7 @@ PanelWindow {
             if (root.currentView === "wifi") return wifiMenuCard.height
             if (root.currentView === "bluetooth") return btMenuCard.height
             if (root.currentView === "sound") return soundMenuCard.height
-            if (root.currentView === "screentime") return screenTimeMenuCard.height
+            if (root.currentView === "screentime" || root.currentView === "power") return powerMenuCard.height
             if (root.currentView === "display") return displayMenuCard.height
             return mainLayout.implicitHeight
         }
@@ -1087,6 +1137,9 @@ PanelWindow {
                             border.color: "#60ffffff"
                             border.width: 1
 
+                            scale: wifiBadgeMouse.pressed ? 0.92 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
+
                             Text {
                                 anchors.centerIn: parent
                                 font.family: root.iconFont
@@ -1094,6 +1147,7 @@ PanelWindow {
                                 color: root.wifiEnabled ? "#007aff" : "#000000"
                                 text: root.wifiEnabled ? (root.wifiConnected ? "󰖩" : "󰤨") : "󰤮"
                                 renderType: Text.QtRendering
+                                Behavior on color { ColorAnimation { duration: 300; easing.type: Easing.OutCubic } }
                             }
 
                             MouseArea {
@@ -1245,6 +1299,9 @@ PanelWindow {
                             border.color: "#60ffffff"
                             border.width: 1
 
+                            scale: btBadgeMouse.pressed ? 0.92 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
+
                             Text {
                                 anchors.centerIn: parent
                                 font.family: root.iconFont
@@ -1252,6 +1309,7 @@ PanelWindow {
                                 color: root.btPowered ? "#007aff" : "#000000"
                                 text: root.btPowered ? "󰂯" : "󰂲"
                                 renderType: Text.QtRendering
+                                Behavior on color { ColorAnimation { duration: 300; easing.type: Easing.OutCubic } }
                             }
 
                             MouseArea {
@@ -1317,10 +1375,11 @@ PanelWindow {
                     cardRadius: 35
                     isHovered: darkMouse.containsMouse
                     isPressed: darkMouse.pressed
-                    isActive: true
-                    activeColor: root.darkModeActive ? "#90111a24" : Qt.rgba(0.08, 0.40, 0.92, 0.85)
-
-                    
+                    isActive: root.darkModeActive
+                    activeColor: "#000000"
+                    activeBorderColor: Qt.rgba(1.0, 1.0, 1.0, 0.20)
+                    activeRimColor: Qt.rgba(1.0, 1.0, 1.0, 0.14)
+                    idleColor: Theme.cardIdleColor
 
                     transform: [
                         Scale {
@@ -1397,6 +1456,7 @@ PanelWindow {
                         spacing: 10
 
                         Rectangle {
+                            id: dmBadge
                             Layout.alignment: Qt.AlignVCenter
                             Layout.preferredWidth: 46
                             Layout.preferredHeight: 46
@@ -1405,10 +1465,27 @@ PanelWindow {
                             border.color: "#60ffffff"
                             border.width: 1
 
+                            scale: darkMouse.pressed ? 0.92 : (root.darkModeActive ? 1.06 : 1.0)
+                            Behavior on scale {
+                                NumberAnimation {
+                                    duration: 250
+                                    easing.type: Easing.OutBack
+                                    easing.overshoot: 1.25
+                                }
+                            }
+
                             Item {
                                 anchors.centerIn: parent
                                 width: 24
                                 height: 24
+                                rotation: root.darkModeActive ? 180 : 0
+                                Behavior on rotation {
+                                    NumberAnimation {
+                                        duration: 520
+                                        easing.type: Easing.BezierSpline
+                                        easing.bezierCurve: [0.34, 1.4, 0.3, 1.0]
+                                    }
+                                }
 
                                 Canvas {
                                     id: dmIconCanvas
@@ -1421,7 +1498,7 @@ PanelWindow {
                                         const cy = height / 2
                                         const R = 10.5
                                         const r = 5.2
-                                        const col = root.darkModeActive ? "#000000" : "#007aff"
+                                        const col = "#000000"
 
                                         // 1. Outer full ring
                                         ctx.strokeStyle = col
@@ -1472,14 +1549,33 @@ PanelWindow {
                                 renderType: Text.QtRendering
                             }
 
-                            Text {
-                                text: root.darkModeActive ? "On" : "Off"
-                                font.family: root.sfFont
-                                font.pixelSize: 13
-                                color: root.darkModeActive ? "#94a3b8" : "#93c5fd"
+                            Item {
                                 Layout.fillWidth: true
-                                elide: Text.ElideRight
-                                renderType: Text.QtRendering
+                                implicitHeight: 18
+
+                                Text {
+                                    text: "On"
+                                    font.family: root.sfFont
+                                    font.pixelSize: 13
+                                    color: "#f1f5f9"
+                                    renderType: Text.QtRendering
+                                    opacity: root.darkModeActive ? 1.0 : 0.0
+                                    y: root.darkModeActive ? 0 : 5
+                                    Behavior on opacity { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                                    Behavior on y { NumberAnimation { duration: 320; easing.type: Easing.OutBack; easing.overshoot: 1.1 } }
+                                }
+
+                                Text {
+                                    text: "Off"
+                                    font.family: root.sfFont
+                                    font.pixelSize: 13
+                                    color: "#94a3b8"
+                                    renderType: Text.QtRendering
+                                    opacity: !root.darkModeActive ? 1.0 : 0.0
+                                    y: !root.darkModeActive ? 0 : -5
+                                    Behavior on opacity { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                                    Behavior on y { NumberAnimation { duration: 320; easing.type: Easing.OutBack; easing.overshoot: 1.1 } }
+                                }
                             }
                         }
                     }
@@ -1489,6 +1585,9 @@ PanelWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
+                        onPressed: (mouse) => {
+                            darkPill.setClickPos(mouse.x, mouse.y)
+                        }
                         onClicked: Theme.toggleDarkMode()
                     }
                 }
@@ -1503,8 +1602,7 @@ PanelWindow {
                     isPressed: dndMouse.pressed
                     isActive: root.dndActive
                     activeColor: Qt.rgba(0.55, 0.20, 0.85, 0.85)
-
-                    
+                    idleColor: Theme.cardIdleColor
 
                     transform: [
                         Scale {
@@ -1590,16 +1688,41 @@ PanelWindow {
                             border.color: "#60ffffff"
                             border.width: 1
 
-                            scale: root.dndActive ? 1.05 : 1.0
-                            Behavior on scale { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
+                            scale: dndMouse.pressed ? 0.92 : (root.dndActive ? 1.06 : 1.0)
+                            Behavior on scale {
+                                NumberAnimation {
+                                    duration: 250
+                                    easing.type: Easing.OutBack
+                                    easing.overshoot: 1.25
+                                }
+                            }
 
                             Text {
+                                id: moonIconText
                                 anchors.centerIn: parent
                                 font.family: root.iconFont
                                 font.pixelSize: 24
                                 color: root.dndActive ? "#9333ea" : "#000000"
                                 text: "󰖔"
                                 renderType: Text.QtRendering
+                                Behavior on color { ColorAnimation { duration: 350; easing.type: Easing.OutCubic } }
+
+                                rotation: root.dndActive ? -18 : 0
+                                scale: root.dndActive ? 1.12 : 1.0
+                                Behavior on rotation {
+                                    NumberAnimation {
+                                        duration: 480
+                                        easing.type: Easing.BezierSpline
+                                        easing.bezierCurve: [0.34, 1.4, 0.3, 1.0]
+                                    }
+                                }
+                                Behavior on scale {
+                                    NumberAnimation {
+                                        duration: 400
+                                        easing.type: Easing.BezierSpline
+                                        easing.bezierCurve: [0.34, 1.4, 0.3, 1.0]
+                                    }
+                                }
                             }
                         }
 
@@ -1616,14 +1739,33 @@ PanelWindow {
                                 renderType: Text.QtRendering
                             }
 
-                            Text {
-                                text: root.dndActive ? "Do Not Disturb" : "Off"
-                                font.family: root.sfFont
-                                font.pixelSize: 13
-                                color: root.dndActive ? "#f5d0fe" : "#93c5fd"
+                            Item {
                                 Layout.fillWidth: true
-                                elide: Text.ElideRight
-                                renderType: Text.QtRendering
+                                implicitHeight: 18
+
+                                Text {
+                                    text: "Do Not Disturb"
+                                    font.family: root.sfFont
+                                    font.pixelSize: 13
+                                    color: "#f5d0fe"
+                                    renderType: Text.QtRendering
+                                    opacity: root.dndActive ? 1.0 : 0.0
+                                    y: root.dndActive ? 0 : 5
+                                    Behavior on opacity { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                                    Behavior on y { NumberAnimation { duration: 320; easing.type: Easing.OutBack; easing.overshoot: 1.1 } }
+                                }
+
+                                Text {
+                                    text: "Off"
+                                    font.family: root.sfFont
+                                    font.pixelSize: 13
+                                    color: "#94a3b8"
+                                    renderType: Text.QtRendering
+                                    opacity: !root.dndActive ? 1.0 : 0.0
+                                    y: !root.dndActive ? 0 : -5
+                                    Behavior on opacity { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                                    Behavior on y { NumberAnimation { duration: 320; easing.type: Easing.OutBack; easing.overshoot: 1.1 } }
+                                }
                             }
                         }
                     }
@@ -1633,6 +1775,9 @@ PanelWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
+                        onPressed: (mouse) => {
+                            dndCard.setClickPos(mouse.x, mouse.y)
+                        }
                         onClicked: {
                             root.dndActive = !root.dndActive
                         }
@@ -1727,23 +1872,25 @@ PanelWindow {
                     Layout.preferredHeight: 156
                     spacing: 12
 
-                    // 2.2.1 Screen On Time Capsule Widget (182x70)
-                    ScreenTimeWidget {
-                        id: stCard
+                    // 2.2.1 Power Mode Capsule Widget (182x70)
+                    PowerModeWidget {
+                        id: pwrCard
                         Layout.preferredWidth: 182
                         Layout.preferredHeight: 70
-                        onClicked: root.openScreenTimeMenu()
+                        activeMode: root.powerActiveMode
+                        onClicked: root.openPowerMenu()
+                        onModeChanged: (m) => root.setPowerMode(m)
 
                         transform: [
                             Scale {
-                                id: stScale
-                                origin.x: stCard.width / 2
-                                origin.y: stCard.height / 2
+                                id: pwrScale
+                                origin.x: pwrCard.width / 2
+                                origin.y: pwrCard.height / 2
                                 xScale: 0.75
                                 yScale: 0.75
                             },
                             Translate {
-                                id: stTrans
+                                id: pwrTrans
                                 y: -20
                             }
                         ]
@@ -1753,30 +1900,30 @@ PanelWindow {
                         states: [
                             State {
                                 name: "open"
-                                PropertyChanges { target: stScale; xScale: 1.0; yScale: 1.0 }
-                                PropertyChanges { target: stTrans; y: 0 }
-                                PropertyChanges { target: stCard; opacity: 1.0 }
+                                PropertyChanges { target: pwrScale; xScale: 1.0; yScale: 1.0 }
+                                PropertyChanges { target: pwrTrans; y: 0 }
+                                PropertyChanges { target: pwrCard; opacity: 1.0 }
                             },
                             State {
                                 name: "closed"
-                                PropertyChanges { target: stScale; xScale: 0.75; yScale: 0.75 }
-                                PropertyChanges { target: stTrans; y: -20 }
-                                PropertyChanges { target: stCard; opacity: 0.0 }
+                                PropertyChanges { target: pwrScale; xScale: 0.75; yScale: 0.75 }
+                                PropertyChanges { target: pwrTrans; y: -20 }
+                                PropertyChanges { target: pwrCard; opacity: 0.0 }
                             }
                         ]
                         transitions: [
                             Transition {
                                 from: "closed"; to: "open"
                                 SequentialAnimation {
-                                    PropertyAction { target: stTrans; property: "y"; value: -20 }
-                                    PropertyAction { target: stScale; property: "xScale"; value: 0.75 }
-                                    PropertyAction { target: stScale; property: "yScale"; value: 0.75 }
-                                    PropertyAction { target: stCard; property: "opacity"; value: 1.0 }
+                                    PropertyAction { target: pwrTrans; property: "y"; value: -20 }
+                                    PropertyAction { target: pwrScale; property: "xScale"; value: 0.75 }
+                                    PropertyAction { target: pwrScale; property: "yScale"; value: 0.75 }
+                                    PropertyAction { target: pwrCard; property: "opacity"; value: 1.0 }
                                     PauseAnimation { duration: 70 }
                                     ParallelAnimation {
-                                        NumberAnimation { target: stTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        NumberAnimation { target: stScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        NumberAnimation { target: stScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: pwrTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: pwrScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: pwrScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
                                     }
                                 }
                             },
@@ -1785,17 +1932,17 @@ PanelWindow {
                                 SequentialAnimation {
                                     PauseAnimation { duration: 38 }
                                     ParallelAnimation {
-                                        NumberAnimation { target: stTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        NumberAnimation { target: stScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        NumberAnimation { target: stScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: pwrTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: pwrScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: pwrScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
                                         SequentialAnimation {
                                             PauseAnimation { duration: 250 }
-                                            NumberAnimation { target: stCard; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
+                                            NumberAnimation { target: pwrCard; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
                                         }
                                     }
-                                    PropertyAction { target: stTrans; property: "y"; value: -20 }
-                                    PropertyAction { target: stScale; property: "xScale"; value: 0.75 }
-                                    PropertyAction { target: stScale; property: "yScale"; value: 0.75 }
+                                    PropertyAction { target: pwrTrans; property: "y"; value: -20 }
+                                    PropertyAction { target: pwrScale; property: "xScale"; value: 0.75 }
+                                    PropertyAction { target: pwrScale; property: "yScale"; value: 0.75 }
                                 }
                             }
                         ]
@@ -2131,12 +2278,24 @@ PanelWindow {
                             Layout.alignment: Qt.AlignVCenter
                             font.family: root.iconFont
                             font.pixelSize: 19
-                            color: "#ffffff"
-                            text: "󰃞"
+                            color: root.brightnessLevel <= 0.02 ? "#94a3b8" : "#ffffff"
+                            text: root.brightnessLevel <= 0.02 ? "󰈌" : "󰃞"
                             renderType: Text.QtRendering
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (root.brightnessLevel <= 0.02) {
+                                        root.setBrightness(0.5)
+                                    } else {
+                                        root.setBrightness(0.0)
+                                    }
+                                }
+                            }
                         }
 
-                        // Slider Track + 11-Step Level Tick Markers
+                        // Slider Track + Precision Level Tick Markers
                         Item {
                             id: bSlider
                             Layout.fillWidth: true
@@ -2159,6 +2318,10 @@ PanelWindow {
                                     radius: parent.radius
                                     color: "#ffffff"
                                     width: bTrack.width * root.brightnessLevel
+                                    Behavior on width {
+                                        enabled: !bSliderMouse.pressed
+                                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                                    }
                                 }
 
                                 Rectangle {
@@ -2175,12 +2338,18 @@ PanelWindow {
                                     opacity: bSliderMouse.containsMouse || bSliderMouse.pressed ? 1.0 : 0.0
                                     scale: bSliderMouse.containsMouse || bSliderMouse.pressed ? 1.0 : 0.5
 
+                                    Behavior on x {
+                                        enabled: !bSliderMouse.pressed
+                                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                                    }
                                     Behavior on opacity { NumberAnimation { duration: 150 } }
                                     Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutBack } }
                                 }
                             }
 
-                            // 11 Precision Level Indicator Ticks Under Slider (No min/max ticks)
+                            // Precision Level Indicator Ticks Under Slider:
+                            // index 0: Display Off notch (one level below min)
+                            // indices 1-9: 10% to 90%
                             Item {
                                 id: bTickContainer
                                 anchors.left: bTrack.left
@@ -2195,13 +2364,14 @@ PanelWindow {
                                         property real progress: index / 10.0
                                         x: Math.round(progress * (bTickContainer.width - width))
                                         anchors.verticalCenter: parent.verticalCenter
-                                        width: index === 5 ? 2 : 1.5
-                                        height: index === 5 ? 5 : 3
+                                        width: (index === 0 || index === 5) ? 2 : 1.5
+                                        height: (index === 0 || index === 5) ? 5 : 3
                                         radius: 1
-                                        color: progress <= root.brightnessLevel ? "#ffffff" : "#45ffffff"
-                                        opacity: progress <= root.brightnessLevel ? 0.95 : 0.4
-                                        visible: index > 0 && index < 10
+                                        color: (index === 0 && root.brightnessLevel <= 0.02) ? "#38bdf8" : (progress <= root.brightnessLevel ? "#ffffff" : "#45ffffff")
+                                        opacity: (progress <= root.brightnessLevel || (index === 0 && root.brightnessLevel <= 0.02)) ? 0.95 : 0.4
+                                        visible: index < 10
                                         Behavior on color { ColorAnimation { duration: 100 } }
+                                        Behavior on opacity { NumberAnimation { duration: 100 } }
                                     }
                                 }
                             }
@@ -2213,14 +2383,36 @@ PanelWindow {
                                 cursorShape: Qt.PointingHandCursor
                                 preventStealing: true
                                 function updateVal(mouseX) {
-                                    const v = Math.max(0.05, Math.min(1.0, mouseX / bTrack.width))
+                                    const raw = mouseX / bTrack.width
+                                    let v
+                                    if (raw <= 0.04) {
+                                        v = 0.0 // Level below min: Display Off
+                                    } else if (raw < 0.09) {
+                                        v = 0.10 // Minimum on-level
+                                    } else {
+                                        v = Math.min(1.0, Math.max(0.0, raw))
+                                    }
                                     root.setBrightness(v)
                                 }
                                 onPressed: function(m) { updateVal(m.x) }
                                 onPositionChanged: function(m) { if (pressed) updateVal(m.x) }
                                 onWheel: function(w) {
-                                    const delta = w.angleDelta.y > 0 ? 0.05 : -0.05
-                                    root.setBrightness(Math.max(0.05, Math.min(1.0, root.brightnessLevel + delta)))
+                                    const isUp = w.angleDelta.y > 0
+                                    let next
+                                    if (root.brightnessLevel <= 0.02) {
+                                        next = isUp ? 0.10 : 0.0
+                                    } else {
+                                        if (isUp) {
+                                            next = Math.min(1.0, Math.round((root.brightnessLevel + 0.10) * 10) / 10)
+                                        } else {
+                                            if (root.brightnessLevel <= 0.12) {
+                                                next = 0.0
+                                            } else {
+                                                next = Math.max(0.10, Math.round((root.brightnessLevel - 0.10) * 10) / 10)
+                                            }
+                                        }
+                                    }
+                                    root.setBrightness(next)
                                 }
                             }
                         }
@@ -4028,17 +4220,14 @@ PanelWindow {
         }
 
         // ══════════════════════════════════════════════════════════════
-        // VIEW 5: macOS STYLE SCREEN TIME SUB-MENU (App Breakdown)
+        // VIEW 5: macOS STYLE POWER MODE SUB-MENU (APU & Thermal Profile)
         // ══════════════════════════════════════════════════════════════
         LiquidGlassCard {
-            id: screenTimeMenuCard
-            width: 356
-            height: screenTimeCol.implicitHeight + 28
+            id: powerMenuCard
+            width: 376
+            height: powerCol.implicitHeight + 28
             cardRadius: dynamicRadius
             clip: true
-
-            // Dynamic Island-style entrance/exit centered in panel
-            x: (parent.width - width) / 2
 
             // Pop out and merge back into originating widget
             property real startTransX: 97
@@ -4057,27 +4246,27 @@ PanelWindow {
             opacity: 0.0
             visible: opacity > 0.001
 
-            Component.onCompleted: root.setupMenuOrigin(screenTimeMenuCard, stCard, 97, -73, 0.511, 0.184, 190)
+            Component.onCompleted: root.setupMenuOrigin(powerMenuCard, pwrCard, 97, -73, 0.511, 0.184, 190)
 
             transform: [
                 Scale {
-                    origin.x: screenTimeMenuCard.width / 2
-                    origin.y: screenTimeMenuCard.height / 2
-                    xScale: screenTimeMenuCard.contentScaleX
-                    yScale: screenTimeMenuCard.contentScaleY
+                    origin.x: powerMenuCard.width / 2
+                    origin.y: powerMenuCard.height / 2
+                    xScale: powerMenuCard.contentScaleX
+                    yScale: powerMenuCard.contentScaleY
                 },
                 Translate {
-                    x: screenTimeMenuCard.contentTransX
-                    y: screenTimeMenuCard.contentTransY
+                    x: powerMenuCard.contentTransX
+                    y: powerMenuCard.contentTransY
                 }
             ]
 
             states: [
                 State {
                     name: "open"
-                    when: root.currentView === "screentime"
+                    when: root.currentView === "power" || root.currentView === "screentime"
                     PropertyChanges {
-                        target: screenTimeMenuCard
+                        target: powerMenuCard
                         opacity: 1.0
                         contentScaleX: 1.0
                         contentScaleY: 1.0
@@ -4089,15 +4278,15 @@ PanelWindow {
                 },
                 State {
                     name: "closed"
-                    when: root.currentView !== "screentime"
+                    when: root.currentView !== "power" && root.currentView !== "screentime"
                     PropertyChanges {
-                        target: screenTimeMenuCard
+                        target: powerMenuCard
                         opacity: 0.0
-                        contentScaleX: screenTimeMenuCard.startScaleX
-                        contentScaleY: screenTimeMenuCard.startScaleY
-                        contentTransX: screenTimeMenuCard.startTransX
-                        contentTransY: screenTimeMenuCard.startTransY
-                        dynamicRadius: screenTimeMenuCard.startRadius
+                        contentScaleX: powerMenuCard.startScaleX
+                        contentScaleY: powerMenuCard.startScaleY
+                        contentTransX: powerMenuCard.startTransX
+                        contentTransY: powerMenuCard.startTransY
+                        dynamicRadius: powerMenuCard.startRadius
                         contentOpacity: 0.0
                     }
                 }
@@ -4108,18 +4297,18 @@ PanelWindow {
                     from: "closed"; to: "open"
                     ParallelAnimation {
                         NumberAnimation {
-                            target: screenTimeMenuCard; property: "opacity"
+                            target: powerMenuCard; property: "opacity"
                             duration: 110; easing.type: Easing.OutQuad
                         }
                         SequentialAnimation {
                             PauseAnimation { duration: 60 }
                             NumberAnimation {
-                                target: screenTimeMenuCard; property: "contentOpacity"
+                                target: powerMenuCard; property: "contentOpacity"
                                 duration: 240; easing.type: Easing.OutQuad
                             }
                         }
                         NumberAnimation {
-                            target: screenTimeMenuCard
+                            target: powerMenuCard
                             properties: "contentScaleX,contentScaleY,contentTransX,contentTransY,dynamicRadius"
                             duration: 540
                             easing.type: Easing.BezierSpline
@@ -4131,20 +4320,20 @@ PanelWindow {
                     from: "open"; to: "closed"
                     ParallelAnimation {
                         NumberAnimation {
-                            target: screenTimeMenuCard; property: "contentOpacity"
+                            target: powerMenuCard; property: "contentOpacity"
                             to: 0.0
                             duration: 110; easing.type: Easing.OutQuad
                         }
                         SequentialAnimation {
                             PauseAnimation { duration: 320 }
                             NumberAnimation {
-                                target: screenTimeMenuCard; property: "opacity"
+                                target: powerMenuCard; property: "opacity"
                                 to: 0.0
                                 duration: 180; easing.type: Easing.OutQuad
                             }
                         }
                         NumberAnimation {
-                            target: screenTimeMenuCard
+                            target: powerMenuCard
                             properties: "contentScaleX,contentScaleY,contentTransX,contentTransY,dynamicRadius"
                             duration: 500
                             easing.type: Easing.BezierSpline
@@ -4154,14 +4343,49 @@ PanelWindow {
                 }
             ]
 
+            readonly property var pwrProfiles: [
+                {
+                    key: "peak",
+                    title: "Peak 35W",
+                    sub: "35W / 100°C",
+                    watt: "35W",
+                    col: "#f43f5e",
+                    icon: "󰓅"
+                },
+                {
+                    key: "performance",
+                    title: "Performance 30W",
+                    sub: "30W / 100°C",
+                    watt: "30W",
+                    col: "#f97316",
+                    icon: "󰈸"
+                },
+                {
+                    key: "balanced",
+                    title: "Balanced 15W",
+                    sub: "15W / 90°C",
+                    watt: "15W",
+                    col: "#0ea5e9",
+                    icon: "󰞬"
+                },
+                {
+                    key: "batterysaver",
+                    title: "Battery Saver 10W",
+                    sub: "10W / 80°C",
+                    watt: "10W",
+                    col: "#10b981",
+                    icon: "󰌪"
+                }
+            ]
+
             ColumnLayout {
-                id: screenTimeCol
-                opacity: screenTimeMenuCard.contentOpacity
+                id: powerCol
+                opacity: powerMenuCard.contentOpacity
                 anchors.fill: parent
                 anchors.margins: 14
                 spacing: 12
 
-                // Header: < Back | Screen Time
+                // Header: < Back | Power Mode
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 10
@@ -4170,7 +4394,7 @@ PanelWindow {
                         Layout.preferredWidth: 34
                         Layout.preferredHeight: 34
                         radius: 17
-                        color: backStMouse.containsMouse ? "#30ffffff" : "transparent"
+                        color: backPwrMouse.containsMouse ? "#30ffffff" : "transparent"
 
                         Text {
                             anchors.centerIn: parent
@@ -4182,7 +4406,7 @@ PanelWindow {
                         }
 
                         MouseArea {
-                            id: backStMouse
+                            id: backPwrMouse
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
@@ -4191,128 +4415,73 @@ PanelWindow {
                     }
 
                     Text {
-                        text: "Screen Time"
+                        text: "Power Mode"
                         font.family: root.sfFont
                         font.pixelSize: 20
+                        font.bold: true
                         color: "#ffffff"
                         renderType: Text.QtRendering
                     }
 
                     Item { Layout.fillWidth: true }
-                }
 
-                // Hero Screen Time Display (Big prominent duration)
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    Layout.topMargin: 2
-                    Layout.bottomMargin: 2
-                    spacing: 1
+                    // Active Wattage Pill
+                    Rectangle {
+                        Layout.preferredHeight: 24
+                        implicitWidth: wattBadgeText.implicitWidth + 16
+                        radius: 12
+                        color: "#25ffffff"
+                        border.color: "#40ffffff"
+                        border.width: 1
 
-                    Text {
-                        text: root.screenTimeTotalFormatted
-                        font.family: root.sfFontBold
-                        font.pixelSize: 32
-                        color: "#ffffff"
-                        renderType: Text.QtRendering
-                    }
-
-                    Text {
-                        text: "Total active screen time today"
-                        font.family: root.sfFont
-                        font.pixelSize: 13
-                        color: "#94a3b8"
-                        renderType: Text.QtRendering
-                    }
-                }
-
-                // Hero Multi-Colored Segmented Capsule Bar (100% Curvy Ends via Canvas Clipping)
-                Canvas {
-                    id: heroBarCanvas
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 14
-                    renderTarget: Canvas.Image
-
-                    onPaint: {
-                        const ctx = getContext("2d")
-                        ctx.clearRect(0, 0, width, height)
-                        const r = height / 2
-
-                        // Capsule clipping path
-                        ctx.save()
-                        ctx.beginPath()
-                        ctx.moveTo(r, 0)
-                        ctx.lineTo(width - r, 0)
-                        ctx.arc(width - r, r, r, -Math.PI / 2, Math.PI / 2, false)
-                        ctx.lineTo(r, height)
-                        ctx.arc(r, r, r, Math.PI / 2, -Math.PI / 2, false)
-                        ctx.closePath()
-                        ctx.clip()
-
-                        // Background track
-                        ctx.fillStyle = "#25ffffff"
-                        ctx.fillRect(0, 0, width, height)
-
-                        // Draw Colored App Segments
-                        let curX = 0
-                        if (root.screenTimeApps && root.screenTimeApps.length > 0 && root.screenTimeTotalSec > 0) {
-                            for (let i = 0; i < root.screenTimeApps.length; i++) {
-                                const app = root.screenTimeApps[i]
-                                const w = Math.max(2, (app.seconds / root.screenTimeTotalSec) * width)
-                                ctx.fillStyle = app.color || "#3b82f6"
-                                ctx.fillRect(curX, 0, w, height)
-                                curX += w
-                            }
-                        } else {
-                            ctx.fillStyle = "#475569"
-                            ctx.fillRect(0, 0, width, height)
+                        Text {
+                            id: wattBadgeText
+                            anchors.centerIn: parent
+                            text: root.powerWattage
+                            font.family: root.sfFontBold
+                            font.pixelSize: 12
+                            color: "#ffffff"
+                            renderType: Text.QtRendering
                         }
-                        ctx.restore()
-
-                        // Border
-                        ctx.beginPath()
-                        ctx.moveTo(r, 0.5)
-                        ctx.lineTo(width - r, 0.5)
-                        ctx.arc(width - r, r, r - 0.5, -Math.PI / 2, Math.PI / 2, false)
-                        ctx.lineTo(r, height - 0.5)
-                        ctx.arc(r, r, r - 0.5, Math.PI / 2, -Math.PI / 2, false)
-                        ctx.closePath()
-                        ctx.strokeStyle = "#35ffffff"
-                        ctx.lineWidth = 1
-                        ctx.stroke()
-                    }
-
-                    Connections {
-                        target: root
-                        function onScreenTimeAppsChanged() { heroBarCanvas.requestPaint() }
-                        function onScreenTimeTotalSecChanged() { heroBarCanvas.requestPaint() }
                     }
                 }
 
                 // Section Label
                 Text {
-                    text: "Most Used Apps"
+                    text: "APU Performance Profile"
                     font.family: root.sfFont
                     font.pixelSize: 13
                     color: "#94a3b8"
                     renderType: Text.QtRendering
-                    Layout.topMargin: 4
+                    Layout.topMargin: 2
                 }
 
-                // App List (Sorted by highest active time first)
+                // 4 Interactive Profile Cards (Succinct & Clean, Big Fonts)
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 8
 
                     Repeater {
-                        model: root.screenTimeApps
+                        model: powerMenuCard.pwrProfiles
 
                         Rectangle {
+                            id: profileCard
+                            readonly property bool isSelected: root.powerActiveMode === modelData.key
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 52
-                            radius: 14
-                            color: appRowMouse.containsMouse ? "#28ffffff" : "#14ffffff"
-                            border.color: appRowMouse.containsMouse ? "#50ffffff" : "#20ffffff"
-                            border.width: 1
+                            Layout.preferredHeight: 56
+                            radius: 16
+
+                            color: profileCard.isSelected
+                                ? Qt.rgba(255, 255, 255, 0.18)
+                                : (profMouse.containsMouse ? "#24ffffff" : "#12ffffff")
+
+                            border.color: profileCard.isSelected
+                                ? modelData.col
+                                : (profMouse.containsMouse ? "#45ffffff" : "#22ffffff")
+                            border.width: profileCard.isSelected ? 1.5 : 1
+
+                            Behavior on color { ColorAnimation { duration: 200 } }
+                            Behavior on border.color { ColorAnimation { duration: 200 } }
 
                             RowLayout {
                                 anchors.fill: parent
@@ -4320,100 +4489,92 @@ PanelWindow {
                                 anchors.rightMargin: 12
                                 spacing: 12
 
-                                // App Icon or Initial Letter Badge
+                                // High-Tech Vector Icon Badge (38x38)
                                 Rectangle {
-                                    Layout.preferredWidth: 32
-                                    Layout.preferredHeight: 32
-                                    radius: 8
-                                    color: modelData.color || "#3b82f6"
+                                    Layout.preferredWidth: 38
+                                    Layout.preferredHeight: 38
+                                    radius: 19
+                                    color: profileCard.isSelected
+                                        ? Qt.rgba(modelData.col.r, modelData.col.g, modelData.col.b, 0.22)
+                                        : Qt.rgba(1.0, 1.0, 1.0, 0.10)
+                                    border.color: profileCard.isSelected
+                                        ? modelData.col
+                                        : Qt.rgba(1.0, 1.0, 1.0, 0.20)
+                                    border.width: 1.2
 
-                                    Image {
-                                        id: appIconImg
-                                        anchors.centerIn: parent
-                                        width: 22
-                                        height: 22
-                                        source: root.formatAppIcon(modelData.icon || modelData.id)
-                                        fillMode: Image.PreserveAspectFit
-                                        smooth: true
-                                        mipmap: true
-                                        visible: status === Image.Ready
-                                    }
+                                    Behavior on color { ColorAnimation { duration: 200 } }
+                                    Behavior on border.color { ColorAnimation { duration: 200 } }
 
-                                    // Fallback letter if icon not found
                                     Text {
                                         anchors.centerIn: parent
-                                        text: (modelData.name || "A").charAt(0).toUpperCase()
-                                        font.family: root.sfFontBold
-                                        font.pixelSize: 16
-                                        color: "#ffffff"
+                                        text: modelData.icon
+                                        font.family: root.iconFont
+                                        font.pixelSize: 18
+                                        color: modelData.col
                                         renderType: Text.QtRendering
-                                        visible: !appIconImg.visible
                                     }
                                 }
 
-                                // App Name & Percentage
+                                // Succinct Profile Details (SF Pro Rounded Typography - 15px / 12px)
                                 ColumnLayout {
                                     Layout.fillWidth: true
-                                    spacing: 1
+                                    spacing: 2
 
                                     Text {
-                                        text: modelData.name || modelData.id
-                                        font.family: root.sfFont
+                                        text: modelData.title
+                                        font.family: root.sfFontBold
                                         font.pixelSize: 15
+                                        font.bold: true
                                         color: "#ffffff"
-                                        elide: Text.ElideRight
-                                        Layout.fillWidth: true
                                         renderType: Text.QtRendering
                                     }
 
                                     Text {
-                                        text: (modelData.percent || 0) + "% of screen time"
+                                        text: modelData.sub
                                         font.family: root.sfFont
                                         font.pixelSize: 12
                                         color: "#94a3b8"
-                                        Layout.fillWidth: true
                                         renderType: Text.QtRendering
                                     }
                                 }
 
-                                // Active Time Spent (Pinned to extreme right)
-                                Text {
-                                    text: modelData.formatted || "0m"
-                                    font.family: root.sfFontSemibold
-                                    font.pixelSize: 14
-                                    color: "#e2e8f0"
-                                    horizontalAlignment: Text.AlignRight
-                                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-                                    renderType: Text.QtRendering
+                                // Selection Indicator Circle
+                                Rectangle {
+                                    Layout.preferredWidth: 20
+                                    Layout.preferredHeight: 20
+                                    radius: 10
+                                    color: profileCard.isSelected ? modelData.col : "transparent"
+                                    border.color: profileCard.isSelected ? modelData.col : "#50ffffff"
+                                    border.width: 2
+
+                                    Behavior on color { ColorAnimation { duration: 180 } }
+                                    Behavior on border.color { ColorAnimation { duration: 180 } }
+
+                                    Rectangle {
+                                        anchors.centerIn: parent
+                                        width: 8
+                                        height: 8
+                                        radius: 4
+                                        color: "#ffffff"
+                                        visible: profileCard.isSelected
+                                    }
                                 }
                             }
 
                             MouseArea {
-                                id: appRowMouse
+                                id: profMouse
                                 anchors.fill: parent
                                 hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.setPowerMode(modelData.key)
+                                }
                             }
-                        }
-                    }
-
-                    // Empty state if no apps
-                    Item {
-                        visible: root.screenTimeApps.length === 0
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 60
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "No active screen time recorded yet today."
-                            font.family: root.sfFont
-                            font.pixelSize: 13
-                            color: "#94a3b8"
                         }
                     }
                 }
             }
         }
-
         // ══════════════════════════════════════════════════════════════
         // VIEW 6: macOS DISPLAY & MONITORS SUB-MENU
         // ══════════════════════════════════════════════════════════════
@@ -4596,9 +4757,9 @@ PanelWindow {
                             font.family: root.sfFont
                             font.pixelSize: 14
                             font.bold: true
-                            color: "#93c5fd"
+                            color: root.brightnessLevel <= 0.02 ? "#38bdf8" : "#93c5fd"
                             renderType: Text.QtRendering
-                            text: Math.round(root.brightnessLevel * 100) + "%"
+                            text: root.brightnessLevel <= 0.02 ? "OFF" : (Math.round(root.brightnessLevel * 100) + "%")
                         }
                     }
 
@@ -4617,9 +4778,21 @@ PanelWindow {
                                 anchors.centerIn: parent
                                 font.family: root.iconFont
                                 font.pixelSize: 20
-                                color: "#ffffff"
-                                text: "󰃞"
+                                color: root.brightnessLevel <= 0.02 ? "#94a3b8" : "#ffffff"
+                                text: root.brightnessLevel <= 0.02 ? "󰈌" : "󰃞"
                                 renderType: Text.QtRendering
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (root.brightnessLevel <= 0.02) {
+                                        root.setBrightness(0.5)
+                                    } else {
+                                        root.setBrightness(0.0)
+                                    }
+                                }
                             }
                         }
 
@@ -4629,7 +4802,7 @@ PanelWindow {
                             implicitHeight: 32
 
                             property bool sliderPressed: subBrightSliderMouse.pressed
-                            property real fillFraction: Math.max(0.05, Math.min(1.0, root.brightnessLevel))
+                            property real fillFraction: Math.max(0.0, Math.min(1.0, root.brightnessLevel))
 
                             Rectangle {
                                 id: subBrightTrack
@@ -4649,6 +4822,10 @@ PanelWindow {
                                     width: parent.width * subBrightSliderItem.fillFraction
                                     radius: 4
                                     color: "#ffffff"
+                                    Behavior on width {
+                                        enabled: !subBrightSliderMouse.pressed
+                                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                                    }
                                 }
 
                                 Rectangle {
@@ -4662,11 +4839,17 @@ PanelWindow {
                                     anchors.verticalCenter: parent.verticalCenter
                                     x: Math.max(0, Math.min(parent.width - width, parent.width * subBrightSliderItem.fillFraction - width / 2))
                                     scale: subBrightSliderItem.sliderPressed ? 1.25 : 1.0
+                                    Behavior on x {
+                                        enabled: !subBrightSliderMouse.pressed
+                                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                                    }
                                     Behavior on scale { NumberAnimation { duration: 120 } }
                                 }
                             }
 
-                            // 11 Precision Level Indicator Ticks
+                            // Precision Level Indicator Ticks:
+                            // index 0: Display Off notch (one level below min)
+                            // indices 1-9: 10% to 90%
                             Item {
                                 id: subBrightTicks
                                 anchors.left: subBrightTrack.left
@@ -4681,13 +4864,14 @@ PanelWindow {
                                         property real progress: index / 10.0
                                         x: Math.round(progress * (subBrightTicks.width - width))
                                         anchors.verticalCenter: parent.verticalCenter
-                                        width: index === 5 ? 2 : 1.5
-                                        height: index === 5 ? 5 : 3
+                                        width: (index === 0 || index === 5) ? 2 : 1.5
+                                        height: (index === 0 || index === 5) ? 5 : 3
                                         radius: 1
-                                        color: progress <= root.brightnessLevel ? "#ffffff" : "#45ffffff"
-                                        opacity: progress <= root.brightnessLevel ? 0.95 : 0.4
-                                        visible: index > 0 && index < 10
+                                        color: (index === 0 && root.brightnessLevel <= 0.02) ? "#38bdf8" : (progress <= root.brightnessLevel ? "#ffffff" : "#45ffffff")
+                                        opacity: (progress <= root.brightnessLevel || (index === 0 && root.brightnessLevel <= 0.02)) ? 0.95 : 0.4
+                                        visible: index < 10
                                         Behavior on color { ColorAnimation { duration: 100 } }
+                                        Behavior on opacity { NumberAnimation { duration: 100 } }
                                     }
                                 }
                             }
@@ -4700,15 +4884,37 @@ PanelWindow {
                                 preventStealing: true
 
                                 function updateBrightness(mx) {
-                                    const frac = Math.max(0.05, Math.min(1.0, mx / width))
-                                    root.setBrightness(frac)
+                                    const raw = mx / width
+                                    let v
+                                    if (raw <= 0.04) {
+                                        v = 0.0
+                                    } else if (raw < 0.09) {
+                                        v = 0.10
+                                    } else {
+                                        v = Math.min(1.0, Math.max(0.0, raw))
+                                    }
+                                    root.setBrightness(v)
                                 }
 
                                 onPressed: function(mouse) { updateBrightness(mouse.x) }
                                 onPositionChanged: function(mouse) { if (pressed) updateBrightness(mouse.x) }
                                 onWheel: function(wheel) {
-                                    const delta = wheel.angleDelta.y > 0 ? 0.05 : -0.05
-                                    root.setBrightness(Math.max(0.05, Math.min(1.0, root.brightnessLevel + delta)))
+                                    const isUp = wheel.angleDelta.y > 0
+                                    let next
+                                    if (root.brightnessLevel <= 0.02) {
+                                        next = isUp ? 0.10 : 0.0
+                                    } else {
+                                        if (isUp) {
+                                            next = Math.min(1.0, Math.round((root.brightnessLevel + 0.10) * 10) / 10)
+                                        } else {
+                                            if (root.brightnessLevel <= 0.12) {
+                                                next = 0.0
+                                            } else {
+                                                next = Math.max(0.10, Math.round((root.brightnessLevel - 0.10) * 10) / 10)
+                                            }
+                                        }
+                                    }
+                                    root.setBrightness(next)
                                 }
                             }
                         }

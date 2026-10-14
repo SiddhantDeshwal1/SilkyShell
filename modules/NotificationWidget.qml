@@ -54,30 +54,34 @@ PanelWindow {
         if (root._historyLoaded) return
         try {
             const content = historyStorage.text()
-            if (content && content.trim() !== "") {
-                const data = JSON.parse(content.trim())
-                if (Array.isArray(data)) {
-                    root.groupList = data
-                    let maxId = root.lastNotifId
-                    for (let i = 0; i < data.length; i++) {
-                        let items = data[i].items || []
-                        for (let j = 0; j < items.length; j++) {
-                            if (items[j].notifId && items[j].notifId > maxId) {
-                                maxId = items[j].notifId
-                            }
+            if (!content || content.trim() === "") {
+                return
+            }
+            const data = JSON.parse(content.trim())
+            if (Array.isArray(data)) {
+                root.groupList = data
+                let maxId = root.lastNotifId
+                for (let i = 0; i < data.length; i++) {
+                    let items = data[i].items || []
+                    for (let j = 0; j < items.length; j++) {
+                        if (items[j].notifId && items[j].notifId > maxId) {
+                            maxId = items[j].notifId
                         }
                     }
-                    root.lastNotifId = maxId
                 }
+                root.lastNotifId = maxId
+                root._historyLoaded = true
             }
         } catch(e) {
             console.log("Failed to parse notification history:", e)
+            root._historyLoaded = true
         }
-        root._historyLoaded = true
     }
 
     function saveHistory() {
-        if (!root._historyLoaded) return
+        if (!root._historyLoaded) {
+            root.loadHistory()
+        }
         try {
             const jsonStr = JSON.stringify(root.groupList || [])
             historyStorage.setText(jsonStr)
@@ -96,6 +100,10 @@ PanelWindow {
     }
 
     function addNotificationToHistory(notif) {
+        if (!root._historyLoaded) {
+            root.loadHistory()
+        }
+        root.openedWithEmptyHistory = false
         let groups = []
         for (let i = 0; i < root.groupList.length; i++) {
             groups.push(root.groupList[i])
@@ -403,23 +411,24 @@ PanelWindow {
         }
 
         // 15. If Browser but NO specific website source could be determined:
-        // Do NOT collapse together! Keep independent as single:<id>
         if (isBrowser) {
             return {
                 sourceName: appRaw || "Browser",
-                groupKey: "single:" + notifId,
+                groupKey: "app:" + (appLower || "browser"),
                 appIcon: "󰇧",
                 iconBg: "#f59e0b",
                 isWebSource: true
             }
         }
 
-        // 16. If Generic app (notify-send, Notification, etc.):
-        // Do NOT collapse together! Keep independent as single:<id>
+        // 16. Generic or CLI/system notification (notify-send, bash, etc.):
+        // Group by application name so repeated notifications form a neat stack
         if (isGeneric) {
+            const cleanApp = (appRaw && appRaw.trim() !== "") ? appRaw : "Notification"
+            const cleanKey = (appLower && appLower.trim() !== "") ? appLower : "notification"
             return {
-                sourceName: appRaw || "Notification",
-                groupKey: "single:" + notifId,
+                sourceName: cleanApp,
+                groupKey: "app:" + cleanKey,
                 appIcon: "󰂞",
                 iconBg: "#2563eb",
                 isWebSource: false
@@ -429,7 +438,7 @@ PanelWindow {
         // 17. Dedicated desktop application (e.g. VLC, Steam, GIMP, Alacritty):
         return {
             sourceName: appRaw,
-            groupKey: "app:" + appLower,
+            groupKey: "app:" + (appLower || "notification"),
             appIcon: "󰂞",
             iconBg: "#2563eb",
             isWebSource: false
@@ -605,6 +614,23 @@ PanelWindow {
             // 2. If DND is active or Panel is open, don't show floating popup toast
             if (root.dndActive || root.panelOpen) return
 
+            // 2b. Phone notifications are displayed exclusively by Dynamic Island.
+            // They are preserved in Notification History above, but corner toast is suppressed to avoid duplicates.
+            const appLower = appName.toLowerCase()
+            const deskEntry = (notification.desktopEntry || "").toLowerCase()
+            const srcName = (sourceInfo.sourceName || "").toLowerCase()
+            const hints = notification.hints || {}
+            const isPhoneNotification = appLower.includes("kdeconnect") 
+                || deskEntry.includes("kdeconnect")
+                || srcName.includes("kdeconnect")
+                || (hints["x-kde-origin-name"] !== undefined)
+                || (hints["x-kdeconnect-device-id"] !== undefined)
+                || (hints["x-kdeconnect-id"] !== undefined)
+                || (hints["kdeconnect-id"] !== undefined)
+                || (hints["desktop-entry"] && String(hints["desktop-entry"]).toLowerCase().includes("kdeconnect"))
+
+            if (isPhoneNotification) return
+
             // 3. Show floating toast for ONLY this newly arrived notification
             toastModel.append({
                 notifId:    id,
@@ -622,6 +648,7 @@ PanelWindow {
 
     property bool clearingAll: false
     property bool isPanelVisible: false
+    property bool openedWithEmptyHistory: false
 
     function togglePanel() {
         if (panelOpen) closePanel()
@@ -633,6 +660,7 @@ PanelWindow {
         if (root.controlCenter) {
             root.controlCenter.close()
         }
+        root.openedWithEmptyHistory = (!root.groupList || root.groupList.length === 0)
         panelOpen = true
         isPanelVisible = true
         toastModel.clear()
@@ -645,11 +673,12 @@ PanelWindow {
 
     Timer {
         id: hidePanelTimer
-        interval: (!root.groupList || root.groupList.length === 0) ? 440 : 200
+        interval: root.openedWithEmptyHistory ? 440 : 200
         repeat: false
         onTriggered: {
             if (!root.panelOpen) {
                 root.isPanelVisible = false
+                root.openedWithEmptyHistory = false
             }
         }
     }
@@ -657,6 +686,7 @@ PanelWindow {
     function clearAll() {
         if (!root.groupList || root.groupList.length === 0 || clearingAll) return
         clearingAll = true
+        root.openedWithEmptyHistory = false
         clearAnimTimer.restart()
     }
 
@@ -821,9 +851,7 @@ PanelWindow {
                 x: root.panelOpen ? 0 : 28
                 Behavior on x {
                     NumberAnimation {
-                        duration: (!root.groupList || root.groupList.length === 0)
-                            ? (root.panelOpen ? 600 : 400)
-                            : (root.panelOpen ? 295 : 185)
+                        duration: root.panelOpen ? 520 : 380
                         easing.type: root.panelOpen ? Easing.OutBack : Easing.InCubic
                         easing.overshoot: 1.15
                     }
@@ -837,18 +865,14 @@ PanelWindow {
                 yScale: root.panelOpen ? 1.0 : 0.96
                 Behavior on xScale {
                     NumberAnimation {
-                        duration: (!root.groupList || root.groupList.length === 0)
-                            ? (root.panelOpen ? 600 : 400)
-                            : (root.panelOpen ? 295 : 185)
+                        duration: root.panelOpen ? 520 : 380
                         easing.type: root.panelOpen ? Easing.OutBack : Easing.InCubic
                         easing.overshoot: 1.15
                     }
                 }
                 Behavior on yScale {
                     NumberAnimation {
-                        duration: (!root.groupList || root.groupList.length === 0)
-                            ? (root.panelOpen ? 600 : 400)
-                            : (root.panelOpen ? 295 : 185)
+                        duration: root.panelOpen ? 520 : 380
                         easing.type: root.panelOpen ? Easing.OutBack : Easing.InCubic
                         easing.overshoot: 1.15
                     }
@@ -859,9 +883,7 @@ PanelWindow {
         opacity: root.panelOpen ? 1.0 : 0.0
         Behavior on opacity {
             NumberAnimation {
-                duration: (!root.groupList || root.groupList.length === 0)
-                    ? (root.panelOpen ? 450 : 320)
-                    : (root.panelOpen ? 220 : 165)
+                duration: root.panelOpen ? 420 : 300
                 easing.type: root.panelOpen ? Easing.OutCubic : Easing.InCubic
             }
         }
@@ -877,6 +899,8 @@ PanelWindow {
             RowLayout {
                 Layout.fillWidth: true
                 visible: root.groupList && root.groupList.length > 0
+                opacity: root.clearingAll ? 0.0 : 1.0
+                Behavior on opacity { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
 
                 Item { Layout.fillWidth: true }
 
@@ -927,7 +951,7 @@ PanelWindow {
             // Empty State Card (With Smooth Opening and Closing Animations)
             LiquidGlassCard {
                 id: emptyStateCard
-                visible: (!root.groupList || root.groupList.length === 0) && !root.clearingAll && root.isPanelVisible
+                visible: root.openedWithEmptyHistory && (!root.groupList || root.groupList.length === 0) && !root.clearingAll && root.isPanelVisible
                 Layout.fillWidth: true
                 implicitHeight: 82
                 cardRadius: 26
@@ -1019,22 +1043,23 @@ PanelWindow {
                 displaced: Transition {
                     NumberAnimation {
                         property: "y"
-                        duration: 200
-                        easing.type: Easing.OutCubic
+                        duration: 560
+                        easing.type: Easing.BezierSpline
+                        easing.bezierCurve: [0.25, 1.08, 0.22, 1.0, 1.0, 1.0]
                     }
                 }
 
                 remove: Transition {
                     ParallelAnimation {
-                        NumberAnimation { property: "x"; to: 80; duration: 220; easing.type: Easing.OutCubic }
-                        NumberAnimation { property: "opacity"; to: 0.0; duration: 200 }
+                        NumberAnimation { property: "x"; to: 80; duration: 320; easing.type: Easing.OutCubic }
+                        NumberAnimation { property: "opacity"; to: 0.0; duration: 280 }
                     }
                 }
 
                 add: Transition {
                     ParallelAnimation {
-                        NumberAnimation { property: "x"; from: 60; to: 0; duration: 240; easing.type: Easing.OutCubic }
-                        NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 200 }
+                        NumberAnimation { property: "x"; from: 60; to: 0; duration: 360; easing.type: Easing.OutBack; easing.overshoot: 1.1 }
+                        NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 300 }
                     }
                 }
 

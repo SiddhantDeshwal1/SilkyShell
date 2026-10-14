@@ -4,6 +4,8 @@ import "modules"
 
 ShellRoot {
     Bar {}
+    DynamicIslandOverlay {}
     Spotlight {}
     ScreenshotWidget {}
+    AltTabDock {}
 }

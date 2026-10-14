@@ -29,8 +29,14 @@ RowLayout {
         Layout.leftMargin: (root.controlCenter && root.controlCenter.dndActive) ? 3 : 0
         Layout.rightMargin: (root.controlCenter && root.controlCenter.dndActive) ? 3 : 0
 
-        Behavior on implicitWidth { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
-        Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+        Behavior on implicitWidth { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+        Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+
+        scale: (root.controlCenter && root.controlCenter.dndActive) ? 1.0 : 0.4
+        Behavior on scale { NumberAnimation { duration: 280; easing.type: Easing.OutBack; easing.overshoot: 1.35 } }
+
+        rotation: (root.controlCenter && root.controlCenter.dndActive) ? 0 : -25
+        Behavior on rotation { NumberAnimation { duration: 300; easing.type: Easing.OutBack; easing.overshoot: 1.2 } }
 
         Text {
             anchors.centerIn: parent

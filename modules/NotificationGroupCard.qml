@@ -38,14 +38,37 @@ Item {
     signal dismissNotification(int notifId)
     signal dismissGroup(string groupKey)
 
-    // ── Dedicated Non-Blocking HoverHandler ──────────────────────────
+    // ── Dedicated Non-Blocking HoverHandler with Liquid Grace Period ──
     HoverHandler {
         id: groupHover
     }
 
-    property bool isHovered: groupHover.hovered
+    Timer {
+        id: unhoverDelayTimer
+        interval: 90
+        repeat: false
+    }
+
+    Connections {
+        target: groupHover
+        function onHoveredChanged() {
+            if (!groupHover.hovered) {
+                unhoverDelayTimer.restart()
+            } else {
+                unhoverDelayTimer.stop()
+            }
+        }
+    }
+
+    property bool isHovered: groupHover.hovered || unhoverDelayTimer.running
     property bool isPinnedOpen: false
     property bool isExpanded: root.count > 1 && (isHovered || isPinnedOpen)
+
+    // ── Buttery 60fps Liquid Motion Physics Curves ────────────────────
+    // Expressive fluid spring with soft 8% liquid momentum overshoot on expand:
+    readonly property var fluidExpandCurve: [0.25, 1.08, 0.22, 1.0, 1.0, 1.0]
+    // Silky smooth suction retraction with zero clipping or overshoot on collapse:
+    readonly property var fluidCollapseCurve: [0.22, 0.05, 0.24, 1.0, 1.0, 1.0]
 
     // Dynamic Stacking geometry calculations
     readonly property real cardGap: 10
@@ -67,7 +90,7 @@ Item {
         let y = 0
         for (let i = 0; i < targetIndex; i++) {
             let itm = cardRepeater.itemAt(i)
-            let h = itm ? itm.calculatedHeight : 76
+            let h = (itm && itm.calculatedHeight > 0) ? itm.calculatedHeight : (root.topCardHeight > 0 ? root.topCardHeight : 76)
             y += h + root.cardGap
         }
         return y
@@ -79,7 +102,8 @@ Item {
             if (total === 2) return root.topCardHeight + 14
             return root.topCardHeight + 28
         }
-        return Math.max(root.expandedHeight, root.topCardHeight)
+        if (root.expandedHeight > 0) return Math.max(root.expandedHeight, root.topCardHeight)
+        return Math.max(total * (root.topCardHeight + root.cardGap), root.topCardHeight)
     }
 
     function getCardScale(i, exp, total) {
@@ -122,8 +146,9 @@ Item {
 
         Behavior on implicitHeight {
             NumberAnimation {
-                duration: root.isExpanded ? 200 : 180
-                easing.type: Easing.OutCubic
+                duration: root.isExpanded ? 580 : 480
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
             }
         }
 
@@ -131,13 +156,21 @@ Item {
         LiquidGlassCard {
             id: outerGlassBg
             anchors.fill: parent
-            cardRadius: 28
-            idleColor: Theme.darkMode ? "#55101622" : "#18ffffff"
+            cardRadius: root.isExpanded ? 30 : 28
+            idleColor: root.isExpanded
+                ? (Theme.darkMode ? "#55101622" : "#22ffffff")
+                : (Theme.darkMode ? "#50101622" : "#18ffffff")
             opacity: root.count > 1 ? 1.0 : 0.0
             visible: opacity > 0.01
 
+            Behavior on cardRadius {
+                NumberAnimation { duration: root.isExpanded ? 500 : 420; easing.type: Easing.OutCubic }
+            }
+            Behavior on idleColor {
+                ColorAnimation { duration: root.isExpanded ? 520 : 420 }
+            }
             Behavior on opacity {
-                NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+                NumberAnimation { duration: 320; easing.type: Easing.OutCubic }
             }
         }
 
@@ -174,8 +207,9 @@ Item {
 
                 Behavior on implicitHeight {
                     NumberAnimation {
-                        duration: root.isExpanded ? 200 : 180
-                        easing.type: Easing.OutCubic
+                        duration: root.isExpanded ? 580 : 480
+                        easing.type: Easing.BezierSpline
+                        easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
                     }
                 }
 
@@ -187,6 +221,7 @@ Item {
                         id: cardItem
                         anchors.left: parent.left
                         anchors.right: parent.right
+                        transformOrigin: Item.Top
 
                         readonly property real calculatedHeight: Math.min(
                             Screen.height - 180,
@@ -203,8 +238,11 @@ Item {
 
                         Behavior on height {
                             NumberAnimation {
-                                duration: root.isExpanded ? 200 : 180
-                                easing.type: Easing.OutCubic
+                                duration: root.isExpanded
+                                    ? Math.min(600, 520 + index * 30)
+                                    : Math.min(500, 460 + index * 20)
+                                easing.type: Easing.BezierSpline
+                                easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
                             }
                         }
 
@@ -311,21 +349,27 @@ Item {
                         Behavior on y {
                             enabled: !cardItem.isDismissing
                             NumberAnimation {
-                                duration: root.isExpanded ? 200 : 180
-                                easing.type: Easing.OutCubic
+                                duration: root.isExpanded
+                                    ? Math.min(620, 520 + index * 35)
+                                    : Math.min(520, 460 + index * 20)
+                                easing.type: Easing.BezierSpline
+                                easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
                             }
                         }
                         Behavior on scale {
                             enabled: !cardItem.isDismissing
                             NumberAnimation {
-                                duration: root.isExpanded ? 200 : 180
-                                easing.type: Easing.OutCubic
+                                duration: root.isExpanded
+                                    ? Math.min(600, 520 + index * 30)
+                                    : Math.min(500, 460 + index * 20)
+                                easing.type: Easing.BezierSpline
+                                easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
                             }
                         }
                         Behavior on opacity {
                             enabled: !cardItem.isDismissing
                             NumberAnimation {
-                                duration: root.isExpanded ? 180 : 150
+                                duration: root.isExpanded ? 480 : 380
                                 easing.type: Easing.OutCubic
                             }
                         }
@@ -335,14 +379,23 @@ Item {
                             id: innerCardRect
                             anchors.fill: parent
                             clip: true
-                            cardRadius: root.count === 1 ? 24 : 20
+                            cardRadius: root.count === 1 ? 24 : (root.isExpanded ? 22 : 20)
                             isHovered: innerMouse.containsMouse
                             idleColor: (cardItem.isTop || root.isExpanded)
                                 ? (Theme.darkMode ? "#f0131c28" : "#f2ffffff")
                                 : (Theme.darkMode ? "#60111822" : "#20ffffff")
 
-                            Behavior on cardRadius { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
-                            Behavior on idleColor { ColorAnimation { duration: 200 } }
+                            Behavior on cardRadius {
+                                NumberAnimation {
+                                    duration: root.isExpanded ? 500 : 420
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
+                            Behavior on idleColor {
+                                ColorAnimation {
+                                    duration: root.isExpanded ? 500 : 420
+                                }
+                            }
 
                             // Specular shimmer light sweep on tile ascending
                             Rectangle {
@@ -385,6 +438,22 @@ Item {
                                 function onIsTopChanged() {
                                     if (cardItem.isTop) groupShimmerAnim.restart()
                                 }
+                            }
+
+                            Connections {
+                                target: root
+                                function onIsExpandedChanged() {
+                                    if (root.isExpanded && !cardItem.isTop) {
+                                        expandShimmerTimer.interval = 100 + index * 70
+                                        expandShimmerTimer.restart()
+                                    }
+                                }
+                            }
+
+                            Timer {
+                                id: expandShimmerTimer
+                                repeat: false
+                                onTriggered: groupShimmerAnim.restart()
                             }
 
                             MouseArea {
@@ -432,7 +501,7 @@ Item {
                                 }
                             }
 
-                            // Content Row with intelligent fade
+                            // Content Row with intelligent fade & subtle parallax glide
                             // (When collapsed, deeper cards hide their text to eliminate ghost overlapping)
                             RowLayout {
                                 id: cardContentRow
@@ -445,10 +514,23 @@ Item {
                                 opacity: (cardItem.isTop || root.isExpanded) ? 1.0 : 0.0
                                 Behavior on opacity {
                                     NumberAnimation {
-                                        duration: root.isExpanded ? 180 : 150
-                                        easing.type: Easing.OutCubic
+                                        duration: root.isExpanded ? 440 : 260
+                                        easing.type: root.isExpanded ? Easing.OutCubic : Easing.InQuad
                                     }
                                 }
+
+                                transform: [
+                                    Translate {
+                                        y: (!cardItem.isTop && !root.isExpanded) ? -8 : 0
+                                        Behavior on y {
+                                            NumberAnimation {
+                                                duration: root.isExpanded ? 520 : 380
+                                                easing.type: Easing.BezierSpline
+                                                easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
+                                            }
+                                        }
+                                    }
+                                ]
 
                                 // App Squircle Badge
                                 Rectangle {
@@ -503,13 +585,32 @@ Item {
 
                                         // RotateCcw Count Badge Pill (matches top card counter)
                                         Rectangle {
-                                            visible: cardItem.isTop && !root.isExpanded && root.count > 1
+                                            id: countPill
+                                            readonly property bool shouldShow: cardItem.isTop && !root.isExpanded && root.count > 1
                                             implicitWidth: cntRow.implicitWidth + 10
                                             implicitHeight: 20
                                             radius: 10
                                             color: Theme.darkMode ? "#353b82f6" : "#20000000"
                                             border.width: 1
                                             border.color: Theme.darkMode ? "#6060a5fa" : "#30000000"
+
+                                            opacity: shouldShow ? 1.0 : 0.0
+                                            scale: shouldShow ? 1.0 : 0.6
+                                            visible: opacity > 0.01
+
+                                            Behavior on opacity {
+                                                NumberAnimation {
+                                                    duration: root.isExpanded ? 320 : 420
+                                                    easing.type: Easing.OutCubic
+                                                }
+                                            }
+                                            Behavior on scale {
+                                                NumberAnimation {
+                                                    duration: root.isExpanded ? 320 : 420
+                                                    easing.type: Easing.BezierSpline
+                                                    easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
+                                                }
+                                            }
 
                                             RowLayout {
                                                 id: cntRow
@@ -546,11 +647,19 @@ Item {
 
                                         // Individual Card Close Button
                                         Rectangle {
-                                            visible: root.isExpanded || cardItem.isTop
                                             implicitWidth: 22
                                             implicitHeight: 22
                                             radius: 11
+                                            opacity: (root.isExpanded || cardItem.isTop) ? 1.0 : 0.0
+                                            visible: opacity > 0.01
                                             color: cCloseMouse.containsMouse ? (Theme.darkMode ? "#33ffffff" : "#20000000") : "transparent"
+
+                                            Behavior on opacity {
+                                                NumberAnimation {
+                                                    duration: root.isExpanded ? 440 : 260
+                                                    easing.type: root.isExpanded ? Easing.OutCubic : Easing.InQuad
+                                                }
+                                            }
 
                                             scale: cCloseMouse.pressed ? 0.90 : (cCloseMouse.containsMouse ? 1.12 : 1.0)
                                             Behavior on scale {
@@ -624,7 +733,7 @@ Item {
                 visible: opacity > 0.01
 
                 Behavior on opacity {
-                    NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+                    NumberAnimation { duration: 420; easing.type: Easing.OutCubic }
                 }
 
                 // Expand / Collapse Pill Button
@@ -647,11 +756,19 @@ Item {
                         spacing: 6
 
                         Text {
-                            text: root.isExpanded ? "󰅃" : "󰅀"
+                            text: "󰅀"
                             font.family: root.iconFont
                             font.pixelSize: 13
                             color: Theme.darkMode ? "#93c5fd" : "#000000"
                             renderType: Text.QtRendering
+                            rotation: root.isExpanded ? 180 : 0
+                            Behavior on rotation {
+                                NumberAnimation {
+                                    duration: root.isExpanded ? 460 : 380
+                                    easing.type: Easing.BezierSpline
+                                    easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
+                                }
+                            }
                         }
 
                         Text {

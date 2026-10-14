@@ -37,6 +37,10 @@ Item {
             textInput.text = "";
             if (root.activeFilter === "Clipboard") {
                 clipboardView.reload();
+            } else if (root.activeFilter === "Files") {
+                filesView.reload();
+            } else if (root.activeFilter === "Web") {
+                webView.reload();
             }
             focusTimer.restart();
         }
@@ -46,6 +50,8 @@ Item {
     readonly property int activeMenuHeight: {
         if (activeFilter === "Apps") return appGrid.contentHeight;
         if (activeFilter === "Clipboard") return clipboardView.contentHeight;
+        if (activeFilter === "Files") return filesView.contentHeight;
+        if (activeFilter === "Web") return webView.contentHeight;
         if (searchValue !== "") return resultsContainer.contentHeightPixels;
         return 0;
     }
@@ -152,7 +158,7 @@ Item {
     }
 
     onSearchValueChanged: {
-        if (activeFilter === "Apps" || activeFilter === "Clipboard") {
+        if (activeFilter !== "") {
             return;
         }
         if (!searchValue || searchValue.trim() === "") {
@@ -169,7 +175,7 @@ Item {
 
     Timer {
         id: searchDebounce
-        interval: 160
+        interval: 140
         onTriggered: root.doSearch()
     }
 
@@ -179,16 +185,18 @@ Item {
             onRead: function(line) {
                 let trimmed = line.trim();
                 if (trimmed !== "") {
-                    let filename = trimmed.split('/').pop();
-                    root.pendingAsyncResults.push({
-                        action: "command",
-                        id: "file_" + trimmed,
-                        label: filename,
-                        description: trimmed,
-                        icon: "󰈔",
-                        command: "xdg-open '" + trimmed.replace(/'/g, "'\\''") + "'"
-                    });
-                    batchFlushTimer.restart();
+                    try {
+                        let item = JSON.parse(trimmed);
+                        root.pendingAsyncResults.push({
+                            action: "file",
+                            id: item.id,
+                            label: item.label,
+                            description: item.description,
+                            icon: item.icon,
+                            path: item.path
+                        });
+                        batchFlushTimer.restart();
+                    } catch(e) {}
                 }
             }
         }
@@ -270,13 +278,13 @@ Item {
         }
         searchResults = res;
 
-        let safeQ = q.replace(/"/g, '\\"');
-        if (filter === "Files" || (filter === "" && q.length >= 2)) {
-            filesProcess.command = ["sh", "-c", 'fd --max-results 8 -i -E ".cache" -E ".git" -E "node_modules" -E ".cargo" -E ".npm" -E ".local" --type f --type d "' + safeQ + '" /home/banana'];
+        if (filter === "" && q.length >= 2) {
+            filesProcess.command = ["/home/banana/.config/quickshell/scripts/file-search.py", "search", "all", q, "6"];
             filesProcess.running = true;
         }
 
         if (filter === "Clipboard" || (filter === "" && q.length >= 2)) {
+            let safeQ = q.replace(/"/g, '\\"');
             clipboardProcess.command = ["sh", "-c", 'cliphist list | grep -i "' + safeQ + '" | head -n 6'];
             clipboardProcess.running = true;
         }
@@ -330,9 +338,21 @@ Item {
                 borderColor: Theme.cardBorderColor
                 borderWidth: 1.2
                 specularScale: 1.0
+                clipContent: true
 
-                Behavior on width { NumberAnimation { duration: 455; easing.type: Easing.OutCubic } }
-                Behavior on height { NumberAnimation { duration: 550; easing.type: Easing.OutCubic } }
+                Behavior on width {
+                    NumberAnimation {
+                        duration: root.showShortcuts ? 455 : 240
+                        easing.type: Easing.OutCubic
+                    }
+                }
+                Behavior on height {
+                    NumberAnimation {
+                        duration: searchBarContainer.height > 64 ? 340 : 250
+                        easing.type: searchBarContainer.height > 64 ? Easing.OutBack : Easing.OutCubic
+                        easing.overshoot: 1.08
+                    }
+                }
 
                 Item {
                     id: searchInput
@@ -346,7 +366,9 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: {
                             if (root.activeFilter === "Apps") return "󰕰";
+                            if (root.activeFilter === "Files") return "󰉋";
                             if (root.activeFilter === "Clipboard") return "󰈔";
+                            if (root.activeFilter === "Web") return "󰖟";
                             return "󰍉";
                         }
                         font.family: "JetBrainsMono Nerd Font"
@@ -405,7 +427,9 @@ Item {
                             text: {
                                 if (root.hoveredShortcut >= 0 && root.hoveredShortcut < root.shortcuts.length) return "Search " + root.shortcuts[root.hoveredShortcut].label;
                                 if (root.activeFilter === "Apps") return "Search applications...";
+                                if (root.activeFilter === "Files") return "Search files (" + (filesView.activeDriveLabel || "All Drives") + ")...";
                                 if (root.activeFilter === "Clipboard") return "Search clipboard history...";
+                                if (root.activeFilter === "Web") return "Search web with Chrome...";
                                 return "Search";
                             }
                             
@@ -425,12 +449,39 @@ Item {
                             color: "#ffffff"
                             opacity: text.length > 0 ? 1.0 : 0.0
                             onTextChanged: root.searchValue = text
+                            function handleActivate(isAlt) {
+                                if (root.activeFilter === "Apps") {
+                                    appGrid.launchSelected();
+                                } else if (root.activeFilter === "Clipboard") {
+                                    clipboardView.copySelected();
+                                } else if (root.activeFilter === "Files") {
+                                    filesView.openSelected(isAlt);
+                                } else if (root.activeFilter === "Web") {
+                                    webView.openSelected();
+                                } else if (root.hoveredResult >= 0 && root.hoveredResult < root.searchResults.length) {
+                                    resultsContainer.resultClicked(root.searchResults[root.hoveredResult], isAlt);
+                                } else if (root.searchResults.length > 0) {
+                                    resultsContainer.resultClicked(root.searchResults[0], isAlt);
+                                }
+                            }
+
                             Keys.onPressed: function(event) {
+                                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                                    let isAlt = (event.modifiers & Qt.AltModifier) !== 0;
+                                    textInput.handleActivate(isAlt);
+                                    event.accepted = true;
+                                    return;
+                                }
                                 if ((event.modifiers & Qt.MetaModifier) !== 0 || textInput.text.length === 0) {
                                     if (event.key === Qt.Key_1) { root.activateShortcut(0); event.accepted = true; return; }
                                     if (event.key === Qt.Key_2) { root.activateShortcut(1); event.accepted = true; return; }
                                     if (event.key === Qt.Key_3) { root.activateShortcut(2); event.accepted = true; return; }
                                     if (event.key === Qt.Key_4) { root.activateShortcut(3); event.accepted = true; return; }
+                                }
+                                if (event.key === Qt.Key_Tab && root.activeFilter === "Files") {
+                                    filesView.cycleDrive();
+                                    event.accepted = true;
+                                    return;
                                 }
                             }
                             Keys.onEscapePressed: {
@@ -447,6 +498,10 @@ Item {
                                     appGrid.moveSelection(0, -1);
                                 } else if (root.activeFilter === "Clipboard") {
                                     clipboardView.moveSelection(-1);
+                                } else if (root.activeFilter === "Files") {
+                                    filesView.moveSelection(-1);
+                                } else if (root.activeFilter === "Web") {
+                                    webView.moveSelection(-1);
                                 } else if (root.searchResults.length > 0) {
                                     root.hoveredResult = root.hoveredResult <= 0 ? root.searchResults.length - 1 : root.hoveredResult - 1;
                                 }
@@ -456,6 +511,10 @@ Item {
                                     appGrid.moveSelection(0, 1);
                                 } else if (root.activeFilter === "Clipboard") {
                                     clipboardView.moveSelection(1);
+                                } else if (root.activeFilter === "Files") {
+                                    filesView.moveSelection(1);
+                                } else if (root.activeFilter === "Web") {
+                                    webView.moveSelection(1);
                                 } else if (root.searchResults.length > 0) {
                                     root.hoveredResult = root.hoveredResult >= root.searchResults.length - 1 ? 0 : root.hoveredResult + 1;
                                 }
@@ -470,16 +529,13 @@ Item {
                                     appGrid.moveSelection(1, 0);
                                 }
                             }
-                            Keys.onReturnPressed: {
-                                if (root.activeFilter === "Apps") {
-                                    appGrid.launchSelected();
-                                } else if (root.activeFilter === "Clipboard") {
-                                    clipboardView.copySelected();
-                                } else if (root.hoveredResult >= 0 && root.hoveredResult < root.searchResults.length) {
-                                    resultsContainer.resultClicked(root.searchResults[root.hoveredResult]);
-                                } else if (root.searchResults.length > 0) {
-                                    resultsContainer.resultClicked(root.searchResults[0]);
-                                }
+                            Keys.onReturnPressed: function(event) {
+                                let isAlt = (event.modifiers & Qt.AltModifier) !== 0;
+                                textInput.handleActivate(isAlt);
+                            }
+                            Keys.onEnterPressed: function(event) {
+                                let isAlt = (event.modifiers & Qt.AltModifier) !== 0;
+                                textInput.handleActivate(isAlt);
                             }
                         }
                     }
@@ -493,9 +549,30 @@ Item {
                     anchors.bottom: parent.bottom
                     opacity: root.activeFilter === "Apps" ? 1.0 : 0.0
                     visible: root.activeFilter === "Apps" || opacity > 0.01
-                    Behavior on opacity { NumberAnimation { duration: 380; easing.type: Easing.OutCubic } }
+                    transform: Translate {
+                        y: root.activeFilter === "Apps" ? 0 : 8
+                        Behavior on y { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                    }
+                    Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
                     filterQuery: root.activeFilter === "Apps" ? root.searchValue : ""
                     onAppLaunched: root.closeRequested()
+                }
+
+                SpotlightFiles {
+                    id: filesView
+                    anchors.top: searchInput.bottom
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    opacity: root.activeFilter === "Files" ? 1.0 : 0.0
+                    visible: root.activeFilter === "Files" || opacity > 0.01
+                    transform: Translate {
+                        y: root.activeFilter === "Files" ? 0 : 8
+                        Behavior on y { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                    }
+                    Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+                    filterQuery: root.activeFilter === "Files" ? root.searchValue : ""
+                    onFileOpened: root.closeRequested()
                 }
 
                 SpotlightClipboard {
@@ -506,9 +583,30 @@ Item {
                     anchors.bottom: parent.bottom
                     opacity: root.activeFilter === "Clipboard" ? 1.0 : 0.0
                     visible: root.activeFilter === "Clipboard" || opacity > 0.01
-                    Behavior on opacity { NumberAnimation { duration: 380; easing.type: Easing.OutCubic } }
+                    transform: Translate {
+                        y: root.activeFilter === "Clipboard" ? 0 : 8
+                        Behavior on y { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                    }
+                    Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
                     filterQuery: root.activeFilter === "Clipboard" ? root.searchValue : ""
                     onItemCopied: root.closeRequested()
+                }
+
+                SpotlightWeb {
+                    id: webView
+                    anchors.top: searchInput.bottom
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    opacity: root.activeFilter === "Web" ? 1.0 : 0.0
+                    visible: root.activeFilter === "Web" || opacity > 0.01
+                    transform: Translate {
+                        y: root.activeFilter === "Web" ? 0 : 8
+                        Behavior on y { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                    }
+                    Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+                    filterQuery: root.activeFilter === "Web" ? root.searchValue : ""
+                    onSearchExecuted: root.closeRequested()
                 }
 
                 SpotlightResults {
@@ -516,18 +614,27 @@ Item {
                     anchors.top: searchInput.bottom
                     anchors.left: parent.left
                     anchors.right: parent.right
+                    anchors.bottom: parent.bottom
                     visible: root.activeFilter === "" && root.searchValue !== ""
+                    transform: Translate {
+                        y: (root.activeFilter === "" && root.searchValue !== "") ? 0 : 8
+                        Behavior on y { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                    }
+                    opacity: (root.activeFilter === "" && root.searchValue !== "") ? 1.0 : 0.0
+                    Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
                     results: root.searchResults
                     selectedIndex: root.hoveredResult
                     onResultHovered: function(idx) { root.hoveredResult = idx; }
                     onResultUnhovered: function() { }
-                    onResultClicked: function(result) {
+                    onResultClicked: function(result, isTerminal) {
                         if (result.action === "app") {
                             result.appRef.execute();
                         } else if (result.action === "command") {
                             root.runCommand(result.command);
+                        } else if (result.action === "file") {
+                            root.runCommand("/home/banana/.config/quickshell/scripts/file-open.sh " + (isTerminal ? "terminal" : "open") + " '" + result.path.replace(/'/g, "'\\''") + "'");
                         } else if (result.action === "web") {
-                            root.runCommand("xdg-open 'https://duckduckgo.com/?q=" + encodeURIComponent(result.query) + "'");
+                            root.runCommand("/home/banana/.config/quickshell/scripts/web-open.sh '" + (result.query || result.label).replace(/'/g, "'\\''") + "'");
                         }
                         root.closeRequested();
                     }
@@ -543,7 +650,7 @@ Item {
                     width: root.showShortcuts ? 64 : 0
                     height: 64
                     visible: root.showShortcuts || realBubble.opacity > 0.01
-                    Behavior on width { NumberAnimation { duration: 490; easing.type: Easing.OutCubic } }
+                    Behavior on width { NumberAnimation { duration: root.showShortcuts ? 490 : 140; easing.type: Easing.OutCubic } }
 
                     LiquidGlassBackground {
                         id: realBubble
@@ -560,7 +667,6 @@ Item {
                         specularScale: 0.8
                         
                         property real startX: -64 * (index + 1)
-                        property real exitX: (16 + 64) * (root.shortcuts.length - index - 1)
                         
                         x: startX
                         scale: 0.7
@@ -569,7 +675,7 @@ Item {
                         state: root.showShortcuts ? "hovered" : "unhovered"
                         states: [
                             State { name: "hovered"; PropertyChanges { target: realBubble; x: 0; scale: 1.0; opacity: 1.0 } },
-                            State { name: "unhovered"; PropertyChanges { target: realBubble; x: realBubble.exitX; scale: 0.7; opacity: 0.0 } }
+                            State { name: "unhovered"; PropertyChanges { target: realBubble; x: 0; scale: 0.7; opacity: 0.0 } }
                         ]
                         transitions: [
                             Transition {
@@ -587,17 +693,9 @@ Item {
                             },
                             Transition {
                                 from: "hovered"; to: "unhovered"
-                                SequentialAnimation {
-                                    PauseAnimation { duration: index * 55 }
-                                    ParallelAnimation {
-                                        NumberAnimation { target: realBubble; property: "x"; duration: 665; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        NumberAnimation { target: realBubble; property: "scale"; duration: 665; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        SequentialAnimation {
-                                            PauseAnimation { duration: 210 }
-                                            NumberAnimation { target: realBubble; property: "opacity"; to: 0.0; duration: 315; easing.type: Easing.OutQuad }
-                                        }
-                                    }
-                                    PropertyAction { target: realBubble; property: "x"; value: realBubble.startX }
+                                ParallelAnimation {
+                                    NumberAnimation { target: realBubble; property: "scale"; to: 0.6; duration: 140; easing.type: Easing.OutQuad }
+                                    NumberAnimation { target: realBubble; property: "opacity"; to: 0.0; duration: 140; easing.type: Easing.OutQuad }
                                 }
                             }
                         ]

@@ -33,12 +33,11 @@ PanelWindow {
         function toggle() { root.open ? root.closeSpotlight() : root.openSpotlight() }
         function open()   { root.openSpotlight(); spotlightBar.forceSearch(""); }
         function close()  { root.closeSpotlight() }
-        function search(q: string): void { spotlightBar.forceSearch(q) }
+        function search(q: string) { spotlightBar.forceSearch(q) }
     }
 
     function openSpotlight() {
-        runShell("quickshell ipc call controlcenter close &")
-        runShell("quickshell ipc call notifications close &")
+        runShell("quickshell ipc call controlcenter close & quickshell ipc call notifications close &")
         root.open = true
         hideTimer.stop()
     }
@@ -52,6 +51,7 @@ PanelWindow {
 
     Process { id: cmdProc }
     function runShell(cmd) {
+        cmdProc.running = false
         cmdProc.command = ["sh", "-c", cmd]
         cmdProc.running = true
     }

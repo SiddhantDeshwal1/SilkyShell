@@ -46,6 +46,10 @@ PanelWindow {
             implicitWidth: 840
         }
 
+        DynamicIslandBar {
+            id: dynamicIslandBar
+        }
+
         // ── CENTER SPACER ─────────────────────────────────────────────
         Item { Layout.fillWidth: true }
 
@@ -79,7 +83,12 @@ PanelWindow {
         id: controlCenterPanel
         onDndActiveChanged: {
             if (notificationWidget) notificationWidget.dndActive = controlCenterPanel.dndActive
+            DynamicIslandService.focusMode = controlCenterPanel.dndActive
         }
+    }
+
+    Component.onCompleted: {
+        DynamicIslandService.focusMode = controlCenterPanel.dndActive
     }
 }
 

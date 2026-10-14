@@ -9,10 +9,15 @@ Singleton {
     property bool darkMode: true
     property bool _isSaving: false
 
-    readonly property color cardIdleColor: darkMode ? "#90111a24" : "#22ffffff"
-    readonly property color panelBgColor: darkMode ? "#95111a24" : "#22ffffff"
-    readonly property color cardBorderColor: darkMode ? Qt.rgba(1.0, 1.0, 1.0, 0.16) : Qt.rgba(1.0, 1.0, 1.0, 0.22)
-    readonly property color panelBorderColor: darkMode ? "#30ffffff" : "#47ffffff"
+    property color cardIdleColor: darkMode ? "#90111a24" : "#22ffffff"
+    property color panelBgColor: darkMode ? "#95111a24" : "#22ffffff"
+    property color cardBorderColor: darkMode ? Qt.rgba(1.0, 1.0, 1.0, 0.16) : Qt.rgba(1.0, 1.0, 1.0, 0.22)
+    property color panelBorderColor: darkMode ? "#30ffffff" : "#47ffffff"
+
+    Behavior on cardIdleColor { ColorAnimation { duration: 420; easing.type: Easing.OutCubic } }
+    Behavior on panelBgColor { ColorAnimation { duration: 420; easing.type: Easing.OutCubic } }
+    Behavior on cardBorderColor { ColorAnimation { duration: 420; easing.type: Easing.OutCubic } }
+    Behavior on panelBorderColor { ColorAnimation { duration: 420; easing.type: Easing.OutCubic } }
 
     Process {
         id: saveProc

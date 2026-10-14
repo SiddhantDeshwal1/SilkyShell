@@ -195,9 +195,10 @@ PanelWindow {
                 Text {
                     font.family: "JetBrainsMono NFP"
                     font.pixelSize: 18
-                    color: "#ffffff"
+                    color: root.brightnessLevel <= 0.02 ? "#94a3b8" : "#ffffff"
                     text: {
                         const pct = root.brightnessLevel
+                        if (pct <= 0.02) return "󰈌"
                         if (pct > 0.66) return "󰃠"
                         if (pct > 0.33) return "󰃟"
                         return "󰃞"
@@ -218,12 +219,14 @@ PanelWindow {
                     font.family: "SF Pro Rounded"
                     font.pixelSize: 14
                     font.bold: true
-                    color: "#ffffff"
-                    text: Math.round(root.brightnessLevel * 100) + "%"
+                    color: root.brightnessLevel <= 0.02 ? "#38bdf8" : "#ffffff"
+                    text: root.brightnessLevel <= 0.02 ? "OFF" : (Math.round(root.brightnessLevel * 100) + "%")
                 }
             }
 
-            // Progress bar track + 11-Step Level Tick Markers (No min/max ticks)
+            // Progress bar track + Precision Level Tick Markers:
+            // index 0: Display Off notch (one level below min)
+            // indices 1-9: 10% to 90%
             Item {
                 Layout.fillWidth: true
                 implicitHeight: 20
@@ -245,12 +248,14 @@ PanelWindow {
                         color: "#ffffff"
                         width: bTrack.width * root.brightnessLevel
                         Behavior on width {
-                            NumberAnimation { duration: 120; easing.type: Easing.OutQuart }
+                            NumberAnimation { duration: 150; easing.type: Easing.OutQuart }
                         }
                     }
                 }
 
-                // 11 Precision Level Indicator Ticks Under Slider (No min/max ticks)
+                // Precision Level Indicator Ticks Under Slider:
+                // index 0: Display Off notch (one level below min)
+                // indices 1-9: 10% to 90%
                 Item {
                     id: bTickContainer
                     anchors.left: bTrack.left
@@ -265,13 +270,14 @@ PanelWindow {
                             property real progress: index / 10.0
                             x: Math.round(progress * (bTickContainer.width - width))
                             anchors.verticalCenter: parent.verticalCenter
-                            width: index === 5 ? 2 : 1.5
-                            height: index === 5 ? 5 : 3
+                            width: (index === 0 || index === 5) ? 2 : 1.5
+                            height: (index === 0 || index === 5) ? 5 : 3
                             radius: 1
-                            color: progress <= root.brightnessLevel ? "#ffffff" : "#45ffffff"
-                            opacity: progress <= root.brightnessLevel ? 0.95 : 0.4
-                            visible: index > 0 && index < 10
+                            color: (index === 0 && root.brightnessLevel <= 0.02) ? "#38bdf8" : (progress <= root.brightnessLevel ? "#ffffff" : "#45ffffff")
+                            opacity: (progress <= root.brightnessLevel || (index === 0 && root.brightnessLevel <= 0.02)) ? 0.95 : 0.4
+                            visible: index < 10
                             Behavior on color { ColorAnimation { duration: 100 } }
+                            Behavior on opacity { NumberAnimation { duration: 100 } }
                         }
                     }
                 }

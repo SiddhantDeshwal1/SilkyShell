@@ -1,5 +1,8 @@
 singleton Theme 1.0 Theme.qml
 singleton AnimStyle 1.0 AnimStyle.qml
+singleton DynamicIslandService 1.0 DynamicIslandService.qml
+DynamicIslandBar 1.0 DynamicIslandBar.qml
+DynamicIslandOverlay 1.0 DynamicIslandOverlay.qml
 AudioWidget 1.0 AudioWidget.qml
 Bar 1.0 Bar.qml
 BatteryWidget 1.0 BatteryWidget.qml
@@ -18,6 +21,7 @@ MusicWidget 1.0 MusicWidget.qml
 NotificationWidget 1.0 NotificationWidget.qml
 OsdPill 1.0 OsdPill.qml
 ScreenTimeWidget 1.0 ScreenTimeWidget.qml
+PowerModeWidget 1.0 PowerModeWidget.qml
 StatusDevices 1.0 StatusDevices.qml
 SysStats 1.0 SysStats.qml
 TimerWidget 1.0 TimerWidget.qml
@@ -28,6 +32,9 @@ SpotlightBar 1.0 SpotlightBar.qml
 SpotlightResults 1.0 SpotlightResults.qml
 SpotlightAppGrid 1.0 SpotlightAppGrid.qml
 SpotlightClipboard 1.0 SpotlightClipboard.qml
+SpotlightFiles 1.0 SpotlightFiles.qml
+SpotlightWeb 1.0 SpotlightWeb.qml
 ScreenshotWidget 1.0 ScreenshotWidget.qml
 NotificationGroupCard 1.0 NotificationGroupCard.qml
 LiquidGlassBackground 1.0 LiquidGlassBackground.qml
+AltTabDock 1.0 AltTabDock.qml

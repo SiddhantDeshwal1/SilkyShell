@@ -122,16 +122,16 @@ Item {
 
     // ── Phase state ───────────────────────────────────────────────────
     // "idle" | "announce" | "title" | "visualizer" | "volume"
-    property string currentPhase: "idle"
-    property string savedPhase:   "idle"    // phase to restore after volume OSD
-    property int    vizStyle:     0         // 0=vertical, 1=symmetric, 2=wave; cycles mod 3
+    property string currentPhase: "visualizer"
+    property string savedPhase:   "visualizer"    // phase to restore after volume OSD
+    property int    vizStyle:     0               // 0=vertical, 1=symmetric, 2=wave; cycles mod 3
     property real   vizPhase:     0
 
     NumberAnimation on vizPhase {
         from: 0; to: 360
         duration: 10000
         loops: Animation.Infinite
-        running: (root.currentPhase === "visualizer" || root.inCall || (typeof mediaMenu !== 'undefined' && mediaMenu && mediaMenu.open)) && (root.playerState === "playing" || root.inCall)
+        running: (root.currentPhase === "visualizer" || root.inCall || (typeof mediaMenu !== 'undefined' && mediaMenu && mediaMenu.open))
     }
 
     // ── Volume OSD ────────────────────────────────────────────────────
@@ -184,8 +184,11 @@ Item {
 
     Process {
         id: cavaProc
-        running: (root.currentPhase === "visualizer" || (typeof mediaMenu !== 'undefined' && mediaMenu && mediaMenu.open)) && root.playerState === "playing"
+        running: true
         command: ["cava", "-p", "/home/banana/.config/quickshell/scripts/cava-island.ini"]
+        onExited: function(code, status) {
+            cavaRestartTimer.restart()
+        }
         stdout: SplitParser {
             // Each line: "123;456;789;...;\n"  — 16 values separated by ;
             onRead: function(line) {
@@ -197,6 +200,15 @@ Item {
                     bars.push(parseInt(parts[i]) || 0)
                 root.cavaBars = bars
             }
+        }
+    }
+
+    Timer {
+        id: cavaRestartTimer
+        interval: 1000
+        repeat: false
+        onTriggered: {
+            if (!cavaProc.running) cavaProc.running = true
         }
     }
 
@@ -289,8 +301,10 @@ Item {
 
     function exitCallMode() {
         if (playerState === "idle") {
-            currentPhase = "idle"
-            slideTo("idle", "", "#00000000", false)
+            currentPhase = "visualizer"
+            slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
+            phaseTimer.interval = 8000
+            phaseTimer.restart()
         } else {
             startLoop(playerState === "playing" ? "NEW" : "RESUME")
         }
@@ -356,20 +370,29 @@ Item {
         // phase state is consistent before we transition into the new state.
         // This prevents "volume" from becoming a stuck terminal phase.
         if (currentPhase === "volume") {
-            currentPhase = savedPhase !== "volume" ? savedPhase : "idle"
+            currentPhase = savedPhase !== "volume" ? savedPhase : "visualizer"
         }
 
         volDebounce.stop()
 
         if (newState === "idle") {
+            // When no music is playing, change to visualizer mode
             phaseTimer.stop()
-            slideTo("idle", "", "#00000000", false)   // blank — show nothing
-            currentPhase = "idle"
+            currentPhase = "visualizer"
+            slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
+            phaseTimer.interval = 8000
+            phaseTimer.restart()
             return
         }
 
-        // entering playing/paused — always start at announce
-        startLoop(newState === "playing" ? "NEW" : "RESUME")
+        if (newState === "paused") {
+            // entering paused — announce PAUSED briefly then loop into visualizer
+            startLoop("RESUME")
+            return
+        }
+
+        // entering playing — always start at announce
+        startLoop("NEW")
     }
 
     // Called when track changes while already playing or paused
@@ -389,32 +412,54 @@ Item {
                 "#ffffff",
                 false)
 
-        phaseTimer.interval = isPlaying ? 2000 : 3000
+        phaseTimer.interval = isPlaying ? 2000 : 2500
         phaseTimer.restart()
+    }
+
+    function switchVizStyle(newStyle) {
+        if (newStyle === root.vizStyle) return
+        if (currentPhase === "visualizer") {
+            slideTo("visualizer", "", "#ffffff", true, newStyle)
+        } else {
+            root.vizStyle = newStyle
+        }
     }
 
     // Advance to the next phase in the loop
     function advancePhase() {
         if (currentPhase === "volume") return   // volume OSD controls itself
+        if (currentPhase === "call") return     // call mode controls itself
+
+        if (playerState === "idle") {
+            // When no music is playing, cycle through visualizer styles smoothly
+            const nextStyle = (root.vizStyle + 1) % 3
+            currentPhase = "visualizer"
+            slideTo("visualizer", "", "#ffffff", true, nextStyle)
+            phaseTimer.interval = 8000
+            phaseTimer.restart()
+            return
+        }
 
         if (playerState === "paused") {
             if (currentPhase === "announce") {
-                // PAUSED (3s) -> Title (10s)
+                // "PAUSED" (2.5s) -> visualizer (8s)
+                currentPhase = "visualizer"
+                const nextStyle = (root.vizStyle + 1) % 3
+                slideTo("visualizer", "", "#ffffff", true, nextStyle)
+                phaseTimer.interval = 8000
+                phaseTimer.restart()
+            } else if (currentPhase === "visualizer") {
+                // visualizer (8s) -> title (5s)
                 currentPhase = "title"
-                slideTo("title",
-                        root.trackDisplay,
-                        "#ffffff",
-                        false)
-                phaseTimer.interval = 10000
+                slideTo("title", root.trackDisplay, "#ffffff", false)
+                phaseTimer.interval = 5000
                 phaseTimer.restart()
             } else {
-                // Title (10s) -> PAUSED (3s)
-                currentPhase = "announce"
-                slideTo("announce",
-                        "PAUSED",
-                        "#ffffff",
-                        false)
-                phaseTimer.interval = 3000
+                // title (5s) -> visualizer (8s)
+                currentPhase = "visualizer"
+                const nextStyle = (root.vizStyle + 1) % 3
+                slideTo("visualizer", "", "#ffffff", true, nextStyle)
+                phaseTimer.interval = 8000
                 phaseTimer.restart()
             }
             return
@@ -423,9 +468,9 @@ Item {
         if (playerState === "playing") {
             if (currentPhase === "announce" || currentPhase === "title") {
                 // → visualizer (cycle through 3 styles)
-                vizStyle = (vizStyle + 1) % 3
+                const nextStyle = (root.vizStyle + 1) % 3
                 currentPhase = "visualizer"
-                slideTo("visualizer", "", "#ffffff", true)
+                slideTo("visualizer", "", "#ffffff", true, nextStyle)
                 phaseTimer.interval = 7000
                 phaseTimer.restart()
             } else if (currentPhase === "visualizer") {
@@ -444,6 +489,8 @@ Item {
     // Phase advancement timer
     Timer {
         id: phaseTimer
+        interval: 8000
+        running: true
         repeat: false
         onTriggered: root.advancePhase()
     }
@@ -522,10 +569,11 @@ Item {
             }
 
             if (root.playerState === "idle") {
-                // Back to blank idle
-                root.currentPhase = "idle"
-                root.slideTo("idle", "", "#00000000", false)
-                root.savedPhase = "idle"
+                root.currentPhase = "visualizer"
+                root.slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
+                root.savedPhase = "visualizer"
+                phaseTimer.interval = 8000
+                phaseTimer.restart()
                 return
             }
 
@@ -556,11 +604,19 @@ Item {
     property bool animating: false
 
     // Called with:
-    //   phase     — string key of the incoming phase
-    //   label     — text to show (empty string if visualizer or volume)
-    //   color     — text / bar color
-    //   isViz     — true → show canvas instead of text
-    function slideTo(phase, label, color, isViz) {
+    //   phase          — string key of the incoming phase
+    //   label          — text to show (empty string if visualizer or volume)
+    //   color          — text / bar color
+    //   isViz          — true → show canvas instead of text
+    //   targetVizStyle — (optional) style for visualizer (0=vertical, 1=symmetric, 2=wave)
+    function slideTo(phase, label, color, isViz, targetVizStyle) {
+        if (animating) {
+            slideAnim.stop()
+            onSlideComplete()
+        }
+
+        const desiredStyle = (targetVizStyle !== undefined) ? targetVizStyle : root.vizStyle
+
         // Set up the INCOMING (off-screen) slot
         if (activeSlot === 0) {
             // slotB becomes incoming
@@ -574,7 +630,9 @@ Item {
             slotBTitle.color    = color
             slotBTitle.visible  = (phase === "title")
 
+            slotB.slotVizStyle  = desiredStyle
             slotBViz.visible    = isViz
+            if (isViz) slotBViz.requestPaint()
             slotBVol.visible    = (phase === "volume")
             slotBCall.visible   = (phase === "call")
         } else {
@@ -589,7 +647,9 @@ Item {
             slotATitle.color    = color
             slotATitle.visible  = (phase === "title")
 
+            slotA.slotVizStyle  = desiredStyle
             slotAViz.visible    = isViz
+            if (isViz) slotAViz.requestPaint()
             slotAVol.visible    = (phase === "volume")
             slotACall.visible   = (phase === "call")
         }
@@ -604,13 +664,25 @@ Item {
         animating = false
 
         if (activeSlot === 0) {
+            root.vizStyle = slotA.slotVizStyle
             slotBTitle.reset()
+            slotBViz.visible = false
+            slotBVol.visible = false
+            slotBCall.visible = false
+            slotBStatus.visible = false
+
             if (slotATitle.visible && slotATitle.isOverflow) {
                 slotATitle.reset()
                 slotATitleAnim.restart()
             }
         } else {
+            root.vizStyle = slotB.slotVizStyle
             slotATitle.reset()
+            slotAViz.visible = false
+            slotAVol.visible = false
+            slotACall.visible = false
+            slotAStatus.visible = false
+
             if (slotBTitle.visible && slotBTitle.isOverflow) {
                 slotBTitle.reset()
                 slotBTitleAnim.restart()
@@ -682,217 +754,228 @@ Item {
 
         Item {
             id: slotA
-        anchors.left: parent.left
-        anchors.right: parent.right
-        height: root.height
-        y: 0       // starts as active slot (visible)
-        opacity: 1
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: root.height
+            y: 0       // starts as active slot (visible)
+            opacity: 1
+            property int slotVizStyle: root.vizStyle
 
-        // 1. Status Text (locked firmly in dead center for idle & announce)
-        Text {
-            id: slotAStatus
-            anchors.centerIn: parent
-            font.family: root.sfFont
-            font.pixelSize: 19
-            font.bold: false
-            color: "#cc241d"
-            text: "NOTHING"
-            visible: true
-        }
-
-        // 2. Media Title (always starts left-aligned + marquee if overflow)
-        Item {
-            id: slotATitle
-            anchors.fill: parent
-            anchors.leftMargin: 8
-            anchors.rightMargin: 8
-            visible: false
-            clip: true
-
-            property string text: ""
-            property color color: "#d79921"
-
+            // 1. Status Text (locked firmly in dead center for idle & announce)
             Text {
-                id: slotATitleMetric
-                visible: false
+                id: slotAStatus
+                anchors.centerIn: parent
                 font.family: root.sfFont
                 font.pixelSize: 19
                 font.bold: false
-                text: slotATitle.text
+                color: "#cc241d"
+                text: ""
+                visible: false
             }
 
-            property bool isOverflow: slotATitleMetric.implicitWidth > slotATitle.width
-            property real scrollDistance: slotATitleMetric.implicitWidth + 40
-
+            // 2. Media Title (always starts left-aligned + marquee if overflow)
             Item {
-                id: slotATitleTrack
-                height: parent.height
-                width: slotATitle.isOverflow ? (slotATitleMetric.implicitWidth * 2 + 80) : parent.width
-                x: 0
+                id: slotATitle
+                anchors.fill: parent
+                anchors.leftMargin: 8
+                anchors.rightMargin: 8
+                visible: false
+                clip: true
+
+                property string text: ""
+                property color color: "#d79921"
 
                 Text {
-                    id: slotATitle1
-                    anchors.verticalCenter: parent.verticalCenter
+                    id: slotATitleMetric
+                    visible: false
+                    font.family: root.sfFont
+                    font.pixelSize: 19
+                    font.bold: false
+                    text: slotATitle.text
+                }
+
+                property bool isOverflow: slotATitleMetric.implicitWidth > slotATitle.width
+                property real scrollDistance: slotATitleMetric.implicitWidth + 40
+
+                Item {
+                    id: slotATitleTrack
+                    height: parent.height
+                    width: slotATitle.isOverflow ? (slotATitleMetric.implicitWidth * 2 + 80) : parent.width
                     x: 0
-                    font.family: root.sfFont
-                    font.pixelSize: 19
-                    font.bold: false
-                    color: slotATitle.color
-                    text: slotATitle.text
+
+                    Text {
+                        id: slotATitle1
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: 0
+                        font.family: root.sfFont
+                        font.pixelSize: 19
+                        font.bold: false
+                        color: slotATitle.color
+                        text: slotATitle.text
+                    }
+
+                    Text {
+                        id: slotATitle2
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: slotATitleMetric.implicitWidth + 40
+                        font.family: root.sfFont
+                        font.pixelSize: 19
+                        font.bold: false
+                        color: slotATitle.color
+                        text: slotATitle.text
+                        visible: slotATitle.isOverflow
+                    }
                 }
 
-                Text {
-                    id: slotATitle2
-                    anchors.verticalCenter: parent.verticalCenter
-                    x: slotATitleMetric.implicitWidth + 40
-                    font.family: root.sfFont
-                    font.pixelSize: 19
-                    font.bold: false
-                    color: slotATitle.color
-                    text: slotATitle.text
-                    visible: slotATitle.isOverflow
+                SequentialAnimation {
+                    id: slotATitleAnim
+                    running: slotATitle.visible && root.activeSlot === 0 && !root.animating && slotATitle.isOverflow
+                    loops: Animation.Infinite
+
+                    PauseAnimation { duration: 1500 }
+
+                    NumberAnimation {
+                        target: slotATitleTrack
+                        property: "x"
+                        from: 0
+                        to: -slotATitle.scrollDistance
+                        duration: Math.max(1000, slotATitle.scrollDistance * 28)
+                        easing.type: Easing.Linear
+                    }
+
+                    PropertyAction {
+                        target: slotATitleTrack
+                        property: "x"
+                        value: 0
+                    }
+                }
+
+                function reset() {
+                    slotATitleAnim.stop()
+                    slotATitleTrack.x = 0
                 }
             }
 
-            SequentialAnimation {
-                id: slotATitleAnim
-                running: slotATitle.visible && root.activeSlot === 0 && !root.animating && slotATitle.isOverflow
-                loops: Animation.Infinite
+            // 3. Visualizer canvas
+            Canvas {
+                id: slotAViz
+                anchors.fill: parent
+                anchors.margins: 4
+                visible: true
+                renderTarget: Canvas.FramebufferObject
+                renderStrategy: Canvas.Threaded
+                property real vizOpacity: root.playerState === "paused" ? 0.65 : 1.0
 
-                PauseAnimation { duration: 1500 }
+                onPaint: {
+                    if (!visible) return
+                    const ctx = getContext("2d")
+                    ctx.clearRect(0, 0, width, height)
 
-                NumberAnimation {
-                    target: slotATitleTrack
-                    property: "x"
-                    from: 0
-                    to: -slotATitle.scrollDistance
-                    duration: Math.max(1000, slotATitle.scrollDistance * 28)
-                    easing.type: Easing.Linear
-                }
+                    const bars  = root.cavaBars
+                    const n     = bars.length
+                    const total = width
+                    const gap   = 3
+                    const barW  = Math.floor((total - gap * (n - 1)) / n)
+                    const maxH  = height
+                    const style = slotA.slotVizStyle
+                    const paused = root.playerState === "paused"
 
-                PropertyAction {
-                    target: slotATitleTrack
-                    property: "x"
-                    value: 0
-                }
-            }
+                    const grad = ctx.createLinearGradient(0, 0, width, 0)
+                    const baseHue = Math.round(root.vizPhase) % 360
+                    const endHue = Math.round(root.vizPhase + 25) % 360
 
-            function reset() {
-                slotATitleAnim.stop()
-                slotATitleTrack.x = 0
-            }
-        }
+                    const alpha = paused ? 0.65 : 1.0
+                    grad.addColorStop(0.0, "hsla(" + baseHue + ", 95%, 62%, " + alpha + ")")
+                    grad.addColorStop(1.0, "hsla(" + endHue + ", 95%, 62%, " + alpha + ")")
 
-        // 3. Visualizer canvas
-        Canvas {
-            id: slotAViz
-            anchors.fill: parent
-            anchors.margins: 4
-            visible: false
-            property real vizOpacity: root.playerState === "paused" ? 0.3 : 1.0
+                    ctx.globalAlpha = 1.0
 
-            onPaint: {
-                if (!visible) return
-                const ctx = getContext("2d")
-                ctx.clearRect(0, 0, width, height)
-
-                const bars  = root.cavaBars
-                const n     = bars.length
-                const total = width
-                const gap   = 3
-                const barW  = Math.floor((total - gap * (n - 1)) / n)
-                const maxH  = height
-                const style = root.vizStyle
-                const paused = root.playerState === "paused"
-
-                const grad = ctx.createLinearGradient(0, 0, width, 0)
-                const baseHue = Math.round(root.vizPhase) % 360
-                const endHue = Math.round(root.vizPhase + 25) % 360
-
-                const alpha = paused ? 0.35 : 1.0
-                grad.addColorStop(0.0, "hsla(" + baseHue + ", 95%, 62%, " + alpha + ")")
-                grad.addColorStop(1.0, "hsla(" + endHue + ", 95%, 62%, " + alpha + ")")
-
-                ctx.globalAlpha = 1.0
-
-                if (style === 2) {
-                    const cy = maxH / 2
-                    ctx.beginPath()
-                    ctx.strokeStyle = grad
-                    ctx.lineWidth = 2.5
-                    ctx.lineCap = "round"
-                    ctx.lineJoin = "round"
-
-                    const pts = []
-                    for (let i = 0; i < n; i++) {
-                        const val = bars[i] / 1000
-                        const cx2 = i * (barW + gap) + barW / 2
-                        pts.push({ x: cx2, y: cy - val * (cy - 2) })
-                    }
-
-                    ctx.moveTo(pts[0].x, pts[0].y)
-                    for (let i = 0; i < pts.length - 1; i++) {
-                        const cp1x = pts[i].x + (pts[i+1].x - pts[i].x) / 3
-                        const cp1y = pts[i].y
-                        const cp2x = pts[i+1].x - (pts[i+1].x - pts[i].x) / 3
-                        const cp2y = pts[i+1].y
-                        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, pts[i+1].x, pts[i+1].y)
-                    }
-                    ctx.stroke()
-
-                    ctx.beginPath()
-                    ctx.strokeStyle = grad
-                    ctx.moveTo(pts[0].x, cy + (cy - pts[0].y))
-                    for (let i = 0; i < pts.length - 1; i++) {
-                        const cp1x = pts[i].x + (pts[i+1].x - pts[i].x) / 3
-                        const cp1y = cy + (cy - pts[i].y)
-                        const cp2x = pts[i+1].x - (pts[i+1].x - pts[i].x) / 3
-                        const cp2y = cy + (cy - pts[i+1].y)
-                        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, pts[i+1].x, cy + (cy - pts[i+1].y))
-                    }
-                    ctx.stroke()
-
-                    for (let i = 0; i < pts.length; i++) {
-                        const val = bars[i] / 1000
-                        const dotHue = Math.round(root.vizPhase + 10) % 360
-                        ctx.fillStyle = "hsl(" + dotHue + ", 95%, 70%)"
+                    if (style === 2) {
+                        const cy = maxH / 2
                         ctx.beginPath()
-                        ctx.arc(pts[i].x, pts[i].y, Math.max(1, val * 3), 0, Math.PI * 2)
-                        ctx.fill()
-                    }
+                        ctx.strokeStyle = grad
+                        ctx.lineWidth = 2.5
+                        ctx.lineCap = "round"
+                        ctx.lineJoin = "round"
 
-                } else {
-                    for (let i = 0; i < n; i++) {
-                        const val  = bars[i] / 1000
-                        const barH = Math.max(2, val * maxH)
-                        const x    = i * (barW + gap)
+                        const pts = []
+                        for (let i = 0; i < n; i++) {
+                            const rawVal = bars[i] / 1000
+                            const idleVal = (rawVal === 0) ? Math.max(0, 0.04 * (Math.sin((root.vizPhase * 2 + i * 30) * Math.PI / 180) * 0.5 + 0.5)) : 0
+                            const val = rawVal + idleVal
+                            const cx2 = i * (barW + gap) + barW / 2
+                            pts.push({ x: cx2, y: cy - val * (cy - 2) })
+                        }
 
-                        const barHue = Math.round(root.vizPhase + (i / n) * 20) % 360
-                        const lightness = paused ? 35 : (55 + val * 20)
-                        ctx.fillStyle = "hsla(" + barHue + ", 95%, " + Math.round(lightness) + "%, " + alpha + ")"
+                        ctx.moveTo(pts[0].x, pts[0].y)
+                        for (let i = 0; i < pts.length - 1; i++) {
+                            const cp1x = pts[i].x + (pts[i+1].x - pts[i].x) / 3
+                            const cp1y = pts[i].y
+                            const cp2x = pts[i+1].x - (pts[i+1].x - pts[i].x) / 3
+                            const cp2y = pts[i+1].y
+                            ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, pts[i+1].x, pts[i+1].y)
+                        }
+                        ctx.stroke()
 
-                        if (style === 0) {
-                            ctx.fillRect(x, maxH - barH, barW, barH)
-                        } else {
-                            const halfH = barH / 2
-                            const cy    = maxH / 2
-                            ctx.fillRect(x, cy - halfH, barW, barH)
+                        ctx.beginPath()
+                        ctx.strokeStyle = grad
+                        ctx.moveTo(pts[0].x, cy + (cy - pts[0].y))
+                        for (let i = 0; i < pts.length - 1; i++) {
+                            const cp1x = pts[i].x + (pts[i+1].x - pts[i].x) / 3
+                            const cp1y = cy + (cy - pts[i].y)
+                            const cp2x = pts[i+1].x - (pts[i+1].x - pts[i].x) / 3
+                            const cp2y = cy + (cy - pts[i].y)
+                            ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, pts[i+1].x, cy + (cy - pts[i+1].y))
+                        }
+                        ctx.stroke()
+
+                        for (let i = 0; i < pts.length; i++) {
+                            const rawVal = bars[i] / 1000
+                            const idleVal = (rawVal === 0) ? Math.max(0, 0.04 * (Math.sin((root.vizPhase * 2 + i * 30) * Math.PI / 180) * 0.5 + 0.5)) : 0
+                            const val = rawVal + idleVal
+                            const dotHue = Math.round(root.vizPhase + 10) % 360
+                            ctx.fillStyle = "hsl(" + dotHue + ", 95%, 70%)"
+                            ctx.beginPath()
+                            ctx.arc(pts[i].x, pts[i].y, Math.max(1, val * 3), 0, Math.PI * 2)
+                            ctx.fill()
+                        }
+
+                    } else {
+                        for (let i = 0; i < n; i++) {
+                            const rawVal = bars[i] / 1000
+                            const idleVal = (rawVal === 0) ? Math.max(0, 0.04 * (Math.sin((root.vizPhase * 2 + i * 30) * Math.PI / 180) * 0.5 + 0.5)) : 0
+                            const val = rawVal + idleVal
+                            const barH = Math.max(2, val * maxH)
+                            const x    = i * (barW + gap)
+
+                            const barHue = Math.round(root.vizPhase + (i / n) * 20) % 360
+                            const lightness = paused ? 45 : (55 + val * 20)
+                            ctx.fillStyle = "hsla(" + barHue + ", 95%, " + Math.round(lightness) + "%, " + alpha + ")"
+
+                            if (style === 0) {
+                                ctx.fillRect(x, maxH - barH, barW, barH)
+                            } else {
+                                const halfH = barH / 2
+                                const cy    = maxH / 2
+                                ctx.fillRect(x, cy - halfH, barW, barH)
+                            }
                         }
                     }
+
+                    ctx.globalAlpha = 1.0
                 }
 
-                ctx.globalAlpha = 1.0
-            }
-
-
-            // Repaint triggered from cavaProc when this slot is visible
-            Connections {
-                target: root
-                function onCavaBarsChanged() {
-                    if (slotAViz.visible) slotAViz.requestPaint()
+                // Repaint triggered from cavaProc when this slot is visible
+                Connections {
+                    target: root
+                    function onCavaBarsChanged() {
+                        if (slotAViz.visible && slotA.opacity > 0.01) slotAViz.requestPaint()
+                    }
+                    function onVizPhaseChanged() {
+                        if (slotAViz.visible && slotA.opacity > 0.01) slotAViz.requestPaint()
+                    }
                 }
             }
-        }
 
         // 4. Volume OSD content — 20 heavy-bar segments + percentage label
         Item {
@@ -965,6 +1048,8 @@ Item {
                         id: slotACallOut
                         Layout.fillWidth: true
                         Layout.fillHeight: true
+                        renderTarget: Canvas.FramebufferObject
+                        renderStrategy: Canvas.Threaded
                         onPaint: {
                             const ctx = getContext("2d")
                             ctx.clearRect(0, 0, width, height)
@@ -1007,6 +1092,8 @@ Item {
                         id: slotACallMic
                         Layout.fillWidth: true
                         Layout.fillHeight: true
+                        renderTarget: Canvas.FramebufferObject
+                        renderStrategy: Canvas.Threaded
                         onPaint: {
                             const ctx = getContext("2d")
                             ctx.clearRect(0, 0, width, height)
@@ -1041,6 +1128,7 @@ Item {
         height: root.height
         y: root.height   // starts off-screen below
         opacity: 0
+        property int slotVizStyle: root.vizStyle
 
         // 1. Status Text (locked firmly in dead center for idle & announce)
         Text {
@@ -1143,7 +1231,9 @@ Item {
             anchors.fill: parent
             anchors.margins: 4
             visible: false
-            property real vizOpacity: root.playerState === "paused" ? 0.3 : 1.0
+            renderTarget: Canvas.FramebufferObject
+            renderStrategy: Canvas.Threaded
+            property real vizOpacity: root.playerState === "paused" ? 0.65 : 1.0
 
             onPaint: {
                 if (!visible) return
@@ -1156,14 +1246,14 @@ Item {
                 const gap   = 3
                 const barW  = Math.floor((total - gap * (n - 1)) / n)
                 const maxH  = height
-                const style = root.vizStyle
+                const style = slotB.slotVizStyle
                 const paused = root.playerState === "paused"
 
                 const grad = ctx.createLinearGradient(0, 0, width, 0)
                 const baseHue = Math.round(root.vizPhase) % 360
                 const endHue = Math.round(root.vizPhase + 25) % 360
 
-                const alpha = paused ? 0.35 : 1.0
+                const alpha = paused ? 0.65 : 1.0
                 grad.addColorStop(0.0, "hsla(" + baseHue + ", 95%, 62%, " + alpha + ")")
                 grad.addColorStop(1.0, "hsla(" + endHue + ", 95%, 62%, " + alpha + ")")
 
@@ -1179,7 +1269,9 @@ Item {
 
                     const pts = []
                     for (let i = 0; i < n; i++) {
-                        const val = bars[i] / 1000
+                        const rawVal = bars[i] / 1000
+                        const idleVal = (rawVal === 0) ? Math.max(0, 0.04 * (Math.sin((root.vizPhase * 2 + i * 30) * Math.PI / 180) * 0.5 + 0.5)) : 0
+                        const val = rawVal + idleVal
                         const cx2 = i * (barW + gap) + barW / 2
                         pts.push({ x: cx2, y: cy - val * (cy - 2) })
                     }
@@ -1201,13 +1293,15 @@ Item {
                         const cp1x = pts[i].x + (pts[i+1].x - pts[i].x) / 3
                         const cp1y = cy + (cy - pts[i].y)
                         const cp2x = pts[i+1].x - (pts[i+1].x - pts[i].x) / 3
-                        const cp2y = cy + (cy - pts[i+1].y)
+                        const cp2y = cy + (cy - pts[i].y)
                         ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, pts[i+1].x, cy + (cy - pts[i+1].y))
                     }
                     ctx.stroke()
 
                     for (let i = 0; i < pts.length; i++) {
-                        const val = bars[i] / 1000
+                        const rawVal = bars[i] / 1000
+                        const idleVal = (rawVal === 0) ? Math.max(0, 0.04 * (Math.sin((root.vizPhase * 2 + i * 30) * Math.PI / 180) * 0.5 + 0.5)) : 0
+                        const val = rawVal + idleVal
                         const dotHue = Math.round(root.vizPhase + 10) % 360
                         ctx.fillStyle = "hsl(" + dotHue + ", 95%, 70%)"
                         ctx.beginPath()
@@ -1217,12 +1311,14 @@ Item {
 
                 } else {
                     for (let i = 0; i < n; i++) {
-                        const val  = bars[i] / 1000
+                        const rawVal = bars[i] / 1000
+                        const idleVal = (rawVal === 0) ? Math.max(0, 0.04 * (Math.sin((root.vizPhase * 2 + i * 30) * Math.PI / 180) * 0.5 + 0.5)) : 0
+                        const val = rawVal + idleVal
                         const barH = Math.max(2, val * maxH)
                         const x    = i * (barW + gap)
 
                         const barHue = Math.round(root.vizPhase + (i / n) * 20) % 360
-                        const lightness = paused ? 35 : (55 + val * 20)
+                        const lightness = paused ? 45 : (55 + val * 20)
                         ctx.fillStyle = "hsla(" + barHue + ", 95%, " + Math.round(lightness) + "%, " + alpha + ")"
 
                         if (style === 0) {
@@ -1236,11 +1332,13 @@ Item {
                 }
             }
 
-
             Connections {
                 target: root
                 function onCavaBarsChanged() {
-                    if (slotBViz.visible) slotBViz.requestPaint()
+                    if (slotBViz.visible && slotB.opacity > 0.01) slotBViz.requestPaint()
+                }
+                function onVizPhaseChanged() {
+                    if (slotBViz.visible && slotB.opacity > 0.01) slotBViz.requestPaint()
                 }
             }
         }
@@ -1316,6 +1414,8 @@ Item {
                         id: slotBCallOut
                         Layout.fillWidth: true
                         Layout.fillHeight: true
+                        renderTarget: Canvas.FramebufferObject
+                        renderStrategy: Canvas.Threaded
                         onPaint: {
                             const ctx = getContext("2d")
                             ctx.clearRect(0, 0, width, height)
@@ -1358,6 +1458,8 @@ Item {
                         id: slotBCallMic
                         Layout.fillWidth: true
                         Layout.fillHeight: true
+                        renderTarget: Canvas.FramebufferObject
+                        renderStrategy: Canvas.Threaded
                         onPaint: {
                             const ctx = getContext("2d")
                             ctx.clearRect(0, 0, width, height)
@@ -1447,7 +1549,7 @@ Item {
         }
 
         onChangeVizStyle: function(newStyle) {
-            root.vizStyle = newStyle
+            root.switchVizStyle(newStyle)
         }
 
         onPlayerSelected: function(dbusName) {
