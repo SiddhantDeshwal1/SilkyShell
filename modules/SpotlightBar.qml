@@ -4,6 +4,7 @@ import Qt5Compat.GraphicalEffects
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import "SpotlightSemantic.js" as Semantic
 
 Item {
     id: root
@@ -26,6 +27,10 @@ Item {
         { id: "web", icon: "󰖟", label: "Web" }
     ]
     readonly property var springCurve: [0.25, 0.80, 0.35, 1.015, 0.55, 1.015, 0.70, 1.015, 0.80, 1.000, 1.00, 1.000]
+    // Hyprland myBezier from hyprland.lua: points = {{0.05, 0.9}, {0.1, 1.05}}
+    readonly property var myBezier: [0.05, 0.9, 0.1, 1.05, 1.0, 1.0]
+    // Exact mathematical time-reverse mirror of myBezier: (1-x2, 1-y2, 1-x1, 1-y1) -> [0.90, 0.0, 0.95, 0.10, 1.0, 1.0]
+    readonly property var reverseMyBezier: [0.90, 0.0, 0.95, 0.10, 1.0, 1.0]
     readonly property bool showShortcuts: root.hovered && root.searchValue === "" && root.activeFilter === ""
 
     function activateShortcut(index) {
@@ -61,25 +66,90 @@ Item {
     property int padding: 40
     height: searchBarContainer.height + (padding * 2)
 
-    opacity: isOpen ? 1.0 : 0.0
+    opacity: 0.0
     property bool wasOpen: false
 
     transform: [
         Scale {
+            id: barScale
             origin.x: root.width / 2
             origin.y: root.height / 2
-            xScale: root.isOpen ? 1.0 : 0.90
-            yScale: root.isOpen ? 1.0 : 0.90
-            Behavior on xScale { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
-            Behavior on yScale { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
-        },
-        Translate {
-            y: root.isOpen ? 0 : -16
-            Behavior on y { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+            xScale: 0.01
+            yScale: 0.01
         }
     ]
 
-    Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+    state: root.isOpen ? "open" : "closed"
+    states: [
+        State {
+            name: "open"
+            PropertyChanges { target: barScale; xScale: 1.0; yScale: 1.0 }
+            PropertyChanges { target: root; opacity: 1.0 }
+        },
+        State {
+            name: "closed"
+            PropertyChanges { target: barScale; xScale: 0.01; yScale: 0.01 }
+            PropertyChanges { target: root; opacity: 0.0 }
+        }
+    ]
+    transitions: [
+        // Opening animation: 200ms myBezier
+        Transition {
+            from: "closed"; to: "open"
+            ParallelAnimation {
+                NumberAnimation {
+                    target: root
+                    property: "opacity"
+                    duration: 200
+                    easing.type: Easing.BezierSpline
+                    easing.bezierCurve: root.myBezier
+                }
+                NumberAnimation {
+                    target: barScale
+                    properties: "xScale,yScale"
+                    duration: 200
+                    easing.type: Easing.BezierSpline
+                    easing.bezierCurve: root.myBezier
+                }
+            }
+        },
+        // Closing animation: exact 200ms reverse of opening
+        Transition {
+            from: "open"; to: "closed"
+            SequentialAnimation {
+                ParallelAnimation {
+                    NumberAnimation {
+                        target: root
+                        property: "opacity"
+                        duration: 200
+                        easing.type: Easing.BezierSpline
+                        easing.bezierCurve: root.reverseMyBezier
+                    }
+                    NumberAnimation {
+                        target: barScale
+                        properties: "xScale,yScale"
+                        duration: 200
+                        easing.type: Easing.BezierSpline
+                        easing.bezierCurve: root.reverseMyBezier
+                    }
+                }
+                ScriptAction {
+                    script: root.resetState()
+                }
+            }
+        }
+    ]
+
+    function resetState() {
+        hoverDwellTimer.stop();
+        root.hovered = false;
+        root.activeFilter = "";
+        root.searchValue = "";
+        textInput.text = "";
+        root.hoveredShortcut = -1;
+        root.hoveredResult = -1;
+        root.searchResults = [];
+    }
 
     Timer {
         id: focusTimer
@@ -98,31 +168,12 @@ Item {
         }
     }
 
-    Timer {
-        id: resetStateTimer
-        interval: 270
-        repeat: false
-        onTriggered: {
-            hoverDwellTimer.stop();
-            root.hovered = false;
-            root.activeFilter = "";
-            root.searchValue = "";
-            textInput.text = "";
-            root.hoveredShortcut = -1;
-            root.hoveredResult = -1;
-            root.searchResults = [];
-        }
-    }
-
     onIsOpenChanged: {
         if (isOpen) {
-            resetStateTimer.stop();
             wasOpen = true;
             focusTimer.start();
         } else {
             hoverDwellTimer.stop();
-            root.hovered = false;
-            resetStateTimer.restart();
         }
     }
 
@@ -153,7 +204,16 @@ Item {
         }
         root.pendingAsyncResults = [];
         if (added) {
+            current.sort((a, b) => {
+                let pA = a.priority !== undefined ? a.priority : 1;
+                let pB = b.priority !== undefined ? b.priority : 1;
+                if (pA !== pB) return pA - pB;
+                return 0;
+            });
             root.searchResults = current;
+            if (root.hoveredResult < 0 && root.searchResults.length > 0) {
+                root.hoveredResult = 0;
+            }
         }
     }
 
@@ -165,9 +225,11 @@ Item {
             searchDebounce.stop();
             batchFlushTimer.stop();
             pendingAsyncResults = [];
+            webProcess.running = false;
             filesProcess.running = false;
             clipboardProcess.running = false;
             searchResults = [];
+            root.hoveredResult = -1;
             return;
         }
         searchDebounce.restart();
@@ -177,6 +239,32 @@ Item {
         id: searchDebounce
         interval: 140
         onTriggered: root.doSearch()
+    }
+
+    Process {
+        id: webProcess
+        stdout: SplitParser {
+            onRead: function(line) {
+                let trimmed = line.trim();
+                if (trimmed !== "") {
+                    try {
+                        let item = JSON.parse(trimmed);
+                        root.pendingAsyncResults.push({
+                            action: "web",
+                            id: item.id,
+                            label: item.label,
+                            description: item.description,
+                            icon: item.icon || "󰖟",
+                            query: item.query || item.label,
+                            badge: item.badge || "Web",
+                            priority: item.priority !== undefined ? item.priority : 3
+                        });
+                        batchFlushTimer.restart();
+                    } catch(e) {}
+                }
+            }
+        }
+        onExited: root.flushAsyncResults()
     }
 
     Process {
@@ -193,7 +281,9 @@ Item {
                             label: item.label,
                             description: item.description,
                             icon: item.icon,
-                            path: item.path
+                            path: item.path,
+                            badge: "File",
+                            priority: 4
                         });
                         batchFlushTimer.restart();
                     } catch(e) {}
@@ -218,7 +308,9 @@ Item {
                         label: decoded,
                         description: "Clipboard",
                         icon: "󰅌",
-                        command: "echo -n '" + idPart + "' | cliphist decode | wl-copy"
+                        command: "echo -n '" + idPart + "' | cliphist decode | wl-copy",
+                        badge: "Clip",
+                        priority: 5
                     });
                     batchFlushTimer.restart();
                 }
@@ -233,53 +325,69 @@ Item {
 
         batchFlushTimer.stop();
         pendingAsyncResults = [];
+        webProcess.running = false;
         filesProcess.running = false;
         clipboardProcess.running = false;
 
         let res = [];
         if (q.startsWith(">")) {
             let cmd = q.substring(1).trim();
-            if (cmd.length > 0) res.push({ action: "command", id: "cmd", label: cmd, description: "Run Command", icon: "󰆍", command: cmd });
-            searchResults = res; return;
+            if (cmd.length > 0) res.push({ action: "command", id: "cmd", label: cmd, description: "Run Command", icon: "󰆍", command: cmd, badge: "Cmd", priority: 0 });
+            searchResults = res;
+            root.hoveredResult = res.length > 0 ? 0 : -1;
+            return;
         }
         try {
             if (/^[\d\s\+\-\*\/\(\)\.]+$/.test(q) && q.match(/[\+\-\*\/]/)) {
                 let result = eval(q);
-                if (result !== undefined && !isNaN(result)) res.push({ action: "none", id: "math", label: String(result), description: "Calculator", icon: "󰪚" });
+                if (result !== undefined && !isNaN(result)) res.push({ action: "none", id: "math", label: String(result), description: "Calculator", icon: "󰪚", badge: "Calc", priority: 0 });
             }
         } catch(e) {}
 
-        let lowerQ = q.toLowerCase();
         let filter = root.activeFilter;
 
         if (filter === "Apps" || filter === "") {
-            let apps = DesktopEntries.applications.values;
-            let matchedApps = [];
-            for (let i = 0; i < apps.length; i++) {
-                let app = apps[i];
-                if (app && app.name && app.name.toLowerCase().indexOf(lowerQ) !== -1) {
-                    matchedApps.push(app);
-                }
-            }
-            matchedApps.sort((a, b) => {
-                let aScore = a.name.toLowerCase().startsWith(lowerQ) ? 1 : 0;
-                let bScore = b.name.toLowerCase().startsWith(lowerQ) ? 1 : 0;
-                if (aScore !== bScore) return bScore - aScore;
-                return a.name.localeCompare(b.name);
-            });
-            for (let i = 0; i < Math.min(matchedApps.length, 8); i++) {
-                let app = matchedApps[i];
-                res.push({ action: "app", id: app.id, label: app.name, description: app.comment || "Application", iconPath: Quickshell.iconPath(app.icon, true) || "", appRef: app });
+            let apps = (DesktopEntries && DesktopEntries.applications && DesktopEntries.applications.values)
+                ? DesktopEntries.applications.values : [];
+            let matches = Semantic.searchApps(q, apps, 4, 4);
+            for (let i = 0; i < matches.length; i++) {
+                let m = matches[i];
+                let app = m.app;
+                res.push({
+                    action: "app",
+                    id: "app_" + app.id,
+                    label: app.name,
+                    description: m.description,
+                    iconPath: Quickshell.iconPath(app.icon, true) || "",
+                    appRef: app,
+                    badge: m.badge || (m.priority === 2 ? "Related" : "App"),
+                    priority: m.priority !== undefined ? m.priority : 1
+                });
             }
         }
 
-        if (filter === "Web" || (filter === "" && res.length === 0)) {
-            res.push({ action: "web", id: "web", label: `Search Web for "${q}"`, description: "Browser", icon: "󰖟", query: q });
+        if (filter === "Web" || filter === "") {
+            res.push({
+                action: "web",
+                id: "web_search_query",
+                label: `Search Google for "${q}"`,
+                description: "Open in Google Chrome",
+                icon: "󰖟",
+                query: q,
+                badge: "Web",
+                priority: 6
+            });
         }
         searchResults = res;
+        root.hoveredResult = res.length > 0 ? 0 : -1;
+
+        if ((filter === "" || filter === "Web") && q.length >= 2) {
+            webProcess.command = [Paths.script("web-search.py"), "search", q, "3"];
+            webProcess.running = true;
+        }
 
         if (filter === "" && q.length >= 2) {
-            filesProcess.command = ["/home/banana/.config/quickshell/scripts/file-search.py", "search", "all", q, "6"];
+            filesProcess.command = [Paths.script("file-search.py"), "search", "all", q, "6"];
             filesProcess.running = true;
         }
 
@@ -341,16 +449,17 @@ Item {
                 clipContent: true
 
                 Behavior on width {
+                    enabled: root.isOpen
                     NumberAnimation {
                         duration: root.showShortcuts ? 455 : 240
                         easing.type: Easing.OutCubic
                     }
                 }
                 Behavior on height {
+                    enabled: root.isOpen
                     NumberAnimation {
-                        duration: searchBarContainer.height > 64 ? 340 : 250
-                        easing.type: searchBarContainer.height > 64 ? Easing.OutBack : Easing.OutCubic
-                        easing.overshoot: 1.08
+                        duration: searchBarContainer.height > 64 ? 280 : 220
+                        easing.type: Easing.OutCubic
                     }
                 }
 
@@ -484,14 +593,9 @@ Item {
                                     return;
                                 }
                             }
-                            Keys.onEscapePressed: {
-                                if (root.activeFilter !== "") {
-                                    root.activeFilter = "";
-                                    root.searchValue = "";
-                                    textInput.text = "";
-                                } else {
-                                    root.closeRequested();
-                                }
+                            Keys.onEscapePressed: function(event) {
+                                root.closeRequested();
+                                event.accepted = true;
                             }
                             Keys.onUpPressed: {
                                 if (root.activeFilter === "Apps") {
@@ -551,9 +655,9 @@ Item {
                     visible: root.activeFilter === "Apps" || opacity > 0.01
                     transform: Translate {
                         y: root.activeFilter === "Apps" ? 0 : 8
-                        Behavior on y { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                        Behavior on y { enabled: root.isOpen; NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
                     }
-                    Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+                    Behavior on opacity { enabled: root.isOpen; NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
                     filterQuery: root.activeFilter === "Apps" ? root.searchValue : ""
                     onAppLaunched: root.closeRequested()
                 }
@@ -568,9 +672,9 @@ Item {
                     visible: root.activeFilter === "Files" || opacity > 0.01
                     transform: Translate {
                         y: root.activeFilter === "Files" ? 0 : 8
-                        Behavior on y { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                        Behavior on y { enabled: root.isOpen; NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
                     }
-                    Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+                    Behavior on opacity { enabled: root.isOpen; NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
                     filterQuery: root.activeFilter === "Files" ? root.searchValue : ""
                     onFileOpened: root.closeRequested()
                 }
@@ -585,9 +689,9 @@ Item {
                     visible: root.activeFilter === "Clipboard" || opacity > 0.01
                     transform: Translate {
                         y: root.activeFilter === "Clipboard" ? 0 : 8
-                        Behavior on y { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                        Behavior on y { enabled: root.isOpen; NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
                     }
-                    Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+                    Behavior on opacity { enabled: root.isOpen; NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
                     filterQuery: root.activeFilter === "Clipboard" ? root.searchValue : ""
                     onItemCopied: root.closeRequested()
                 }
@@ -602,9 +706,9 @@ Item {
                     visible: root.activeFilter === "Web" || opacity > 0.01
                     transform: Translate {
                         y: root.activeFilter === "Web" ? 0 : 8
-                        Behavior on y { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                        Behavior on y { enabled: root.isOpen; NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
                     }
-                    Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+                    Behavior on opacity { enabled: root.isOpen; NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
                     filterQuery: root.activeFilter === "Web" ? root.searchValue : ""
                     onSearchExecuted: root.closeRequested()
                 }
@@ -618,10 +722,10 @@ Item {
                     visible: root.activeFilter === "" && root.searchValue !== ""
                     transform: Translate {
                         y: (root.activeFilter === "" && root.searchValue !== "") ? 0 : 8
-                        Behavior on y { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                        Behavior on y { enabled: root.isOpen; NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
                     }
                     opacity: (root.activeFilter === "" && root.searchValue !== "") ? 1.0 : 0.0
-                    Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+                    Behavior on opacity { enabled: root.isOpen; NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
                     results: root.searchResults
                     selectedIndex: root.hoveredResult
                     onResultHovered: function(idx) { root.hoveredResult = idx; }
@@ -632,9 +736,9 @@ Item {
                         } else if (result.action === "command") {
                             root.runCommand(result.command);
                         } else if (result.action === "file") {
-                            root.runCommand("/home/banana/.config/quickshell/scripts/file-open.sh " + (isTerminal ? "terminal" : "open") + " '" + result.path.replace(/'/g, "'\\''") + "'");
+                            root.runCommand(Paths.script("file-open.sh") + " " + (isTerminal ? "terminal" : "open") + " '" + result.path.replace(/'/g, "'\\''") + "'");
                         } else if (result.action === "web") {
-                            root.runCommand("/home/banana/.config/quickshell/scripts/web-open.sh '" + (result.query || result.label).replace(/'/g, "'\\''") + "'");
+                            root.runCommand(Paths.script("web-open.sh") + " '" + (result.query || result.label).replace(/'/g, "'\\''") + "'");
                         }
                         root.closeRequested();
                     }
@@ -650,7 +754,7 @@ Item {
                     width: root.showShortcuts ? 64 : 0
                     height: 64
                     visible: root.showShortcuts || realBubble.opacity > 0.01
-                    Behavior on width { NumberAnimation { duration: root.showShortcuts ? 490 : 140; easing.type: Easing.OutCubic } }
+                    Behavior on width { enabled: root.isOpen; NumberAnimation { duration: root.showShortcuts ? 490 : 140; easing.type: Easing.OutCubic } }
 
                     LiquidGlassBackground {
                         id: realBubble

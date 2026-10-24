@@ -24,22 +24,19 @@ Rectangle {
     // behind it for a short time after unplugging.
     property bool charging: !UPower.onBattery
     property bool lastOnBattery: UPower.onBattery
-    property bool musicPlaying: {
+    // Single O(N) scan replacing two separate loops
+    readonly property var _mprisResult: {
         const players = Mpris.players.values
+        let first = null
         for (let i = 0; i < players.length; ++i) {
+            if (!first) first = players[i]
             if (players[i].isPlaying)
-                return true
+                return { playing: true, player: players[i] }
         }
-        return false
+        return { playing: false, player: first }
     }
-    property var activePlayer: {
-        const players = Mpris.players.values
-        for (let i = 0; i < players.length; ++i) {
-            if (players[i].isPlaying)
-                return players[i]
-        }
-        return players.length > 0 ? players[0] : null
-    }
+    property bool musicPlaying: _mprisResult.playing
+    property var activePlayer: _mprisResult.player
     property bool showingOsd: mode !== "time"
     property bool hovering: false
     property bool dashboardOpen: false

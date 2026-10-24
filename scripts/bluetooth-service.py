@@ -10,11 +10,13 @@ import json
 import subprocess
 import os
 import signal
+import fcntl
 import time
 import dbus
 import dbus.service
 import dbus.mainloop.glib
 from gi.repository import GLib
+from qs_daemon_base import set_parent_death_signal
 
 AGENT_PATH = "/org/bluez/quickshell_agent"
 CAPABILITY = "NoInputNoOutput"
@@ -87,32 +89,66 @@ def classify_device(name, icon_prop, dev_class):
     n = (name or "").lower()
     icon = (icon_prop or "").lower()
 
-    if "mouse" in icon or "mouse" in n or "m650" in n or "mx " in n or "trackball" in n:
+    # 1. Gamepad / Controller
+    if "gamepad" in icon or "gaming" in icon or "joystick" in icon or "controller" in n or "gamepad" in n or "xbox" in n or "dualsense" in n or "dualshock" in n or "joy-con" in n or "8bitdo" in n or "pro controller" in n:
+        return "gamepad"
+
+    # 2. Mouse / Pointer
+    if "mouse" in icon or "mouse" in n or "m650" in n or "m720" in n or "mx master" in n or "mx anywhere" in n or "trackball" in n or "touchpad" in n:
         return "mouse"
-    if "keyboard" in icon or "keyboard" in n or "keychron" in n or "k380" in n or "k850" in n:
+
+    # 3. Keyboard
+    if "keyboard" in icon or "keyboard" in n or "keychron" in n or "k380" in n or "k850" in n or "mx keys" in n or "hhkb" in n or "ducky" in n:
         return "keyboard"
-    if "head" in icon or "audio" in icon or "headphone" in n or "headset" in n or "wf-" in n or "wh-" in n or "earbuds" in n or "buds" in n or "airpod" in n or "c710n" in n or "soundcore" in n or "speaker" in n:
-        return "headphones"
-    if "watch" in icon or "watch" in n or "band" in n or "fit" in n:
+
+    # 4. Smart Watch / Wearable
+    if "watch" in icon or "wearable" in icon or "watch" in n or "band" in n or "fit" in n or "fitbit" in n or "garmin" in n:
         return "watch"
-    if "phone" in icon or "phone" in n or "iphone" in n or "pixel" in n or "galaxy" in n or "android" in n:
+
+    # 5. Earbuds / TWS (In-ear wireless buds, AirPods, WF series)
+    if "earbuds" in icon or "earbuds" in n or "earbud" in n or "tws" in n or "airpod" in n or "buds" in n or "wf-" in n or "c710n" in n or "in-ear" in n or "freebuds" in n or "linkbuds" in n or "enco" in n or "ear (" in n or "airpods" in n:
+        return "earbuds"
+
+    # 6. Wired earphones / IEMs
+    if "earphone" in n or "earphones" in n or "iem" in n or "wired" in n:
+        return "earphones"
+
+    # 7. Speakers / Soundbars (Check before general headphones)
+    if "speaker" in icon or "audio-speaker" in icon or "speaker" in n or "soundbar" in n or "soundcore" in n or "jbl" in n or "flip" in n or "charge" in n or "boombox" in n or "homepod" in n or "echo" in n or "nest" in n or "soundlink" in n or "revolve" in n or "marshall" in n or "emberton" in n or "wonderboom" in n or "megaboom" in n:
+        return "speaker"
+
+    # 8. Headset (Headphones with boom mic / gaming headsets)
+    if "headset" in icon or "headset" in n or "gaming" in n or "arctis" in n or "hyperx" in n or "kraken" in n or "blackshark" in n or "void" in n or "virtuoso" in n:
+        return "headset"
+
+    # 9. Over-Ear / On-Ear Headphones
+    if "headphone" in icon or "headphones" in icon or "head" in icon or "audio" in icon or "headphone" in n or "headphones" in n or "wh-" in n or "quietcomfort" in n or "qc35" in n or "qc45" in n or "qc ultra" in n or "xm4" in n or "xm5" in n or "xm3" in n or "beats" in n or "sennheiser" in n or "momentum" in n or "bose" in n or "skullcandy" in n or "rm-125" in n:
+        return "headphones"
+
+    # 10. Phone / Tablet (guard against matching "earphone" or "headphones")
+    if "phone" in icon or "tablet" in icon or "iphone" in n or "pixel" in n or ("galaxy" in n and "bud" not in n and "watch" not in n) or "android" in n or "ipad" in n or ("phone" in n and "earphone" not in n and "headphone" not in n):
         return "phone"
-    if "computer" in icon or "laptop" in n or "desktop" in n:
+
+    # 11. Computer / Laptop
+    if "computer" in icon or "laptop" in n or "desktop" in n or "macbook" in n or "thinkpad" in n:
         return "laptop"
-    
+
+    # 12. Bluetooth class fallback
     if dev_class:
         try:
             cls_val = int(dev_class)
             major = (cls_val >> 8) & 0x1F
-            if major == 4:
+            minor = (cls_val >> 2) & 0x3F
+            if major == 4: # Audio/Video
+                if minor == 1: return "headset"
+                elif minor == 2: return "headphones"
+                elif minor == 5: return "speaker"
                 return "headphones"
-            elif major == 5:
-                minor = (cls_val >> 2) & 0x3F
-                if minor & 0x10:
-                    return "keyboard"
-                elif minor & 0x20:
-                    return "mouse"
-            elif major == 2:
+            elif major == 5: # Peripheral
+                if minor & 0x10: return "keyboard"
+                elif minor & 0x20: return "mouse"
+                elif (minor & 0x04) or (minor & 0x08): return "gamepad"
+            elif major == 2: # Phone
                 return "phone"
         except Exception:
             pass
@@ -215,7 +251,10 @@ def get_full_state(bus=None):
                     if "org.bluez.Battery1" in ifaces:
                         bat_val = ifaces["org.bluez.Battery1"].get("Percentage", None)
                         if bat_val is not None:
-                            bat = str(bat_val)
+                            try:
+                                bat = str(int(bat_val))
+                            except Exception:
+                                bat = str(bat_val)
                     
                     icon_type = classify_device(name, icon_prop, dev_class)
 
@@ -253,13 +292,21 @@ def get_full_state(bus=None):
         return (rank, name_bonus, rssi_val)
 
     devices_list.sort(key=dev_sort_key, reverse=True)
-    connected_dev = next((d["name"] for d in devices_list if d["isConnected"]), "")
+    connected_devs = [d["name"] for d in devices_list if d["isConnected"]]
+    connected_count = len(connected_devs)
+    if connected_count > 1:
+        connected_dev = f"{connected_count} Devices Connected"
+    elif connected_count == 1:
+        connected_dev = connected_devs[0]
+    else:
+        connected_dev = ""
     audio_card = get_audio_card_info()
 
     return {
         "powered": powered,
         "discovering": discovering,
         "connectedDevice": connected_dev,
+        "connectedCount": connected_count,
         "devices": devices_list,
         "audioCard": audio_card
     }
@@ -357,6 +404,19 @@ def run_stream_daemon(active_discovery=False):
     handling pairing requests, streaming state events in real time, and
     reacting instantly to device changes, adapter power, and sleep/resume events.
     """
+    set_parent_death_signal()
+    # Acquire singleton lock
+    try:
+        lock_file = open("/tmp/quickshell_bluetooth.lock", "a+")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(f"{os.getpid()}\n")
+        lock_file.flush()
+    except (BlockingIOError, IOError):
+        sys.stderr.write("[BluetoothService] Another daemon instance is already running. Exiting.\n")
+        sys.exit(0)
+
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
     
@@ -380,6 +440,10 @@ def run_stream_daemon(active_discovery=False):
             pass
 
     loop = GLib.MainLoop()
+
+    # Exit instantly when Quickshell exits or pipe closes
+    GLib.io_add_watch(0, GLib.IOCondition.HUP | GLib.IOCondition.ERR, lambda *a: (loop.quit(), False)[1])
+
     last_state = [None]
     pending_emit = [False]
 
@@ -392,6 +456,9 @@ def run_stream_daemon(active_discovery=False):
                 last_state[0] = encoded
                 sys.stdout.write(encoded + "\n")
                 sys.stdout.flush()
+        except BrokenPipeError:
+            loop.quit()
+            return False
         except Exception:
             pass
         return False
@@ -473,8 +540,8 @@ def run_stream_daemon(active_discovery=False):
     except Exception:
         pass
 
-    # Periodic heartbeat to catch pactl card or battery changes
-    GLib.timeout_add_seconds(3, lambda: (emit_state(force=False), True)[1])
+    # Periodic heartbeat — long interval since D-Bus signals handle real-time changes
+    GLib.timeout_add_seconds(30, lambda: (emit_state(force=False), True)[1])
 
     def sig_handler(*args):
         if active_discovery and adapter_obj:

@@ -54,44 +54,23 @@ PanelWindow {
     }
 
     property var controlCenter: null
+    property bool initialized: false
 
-    // ── Sysfs brightness watcher ──────────────────────────────────────
-    Process {
-        running: true
-        command: [
-            "sh", "-c",
-            "for b in /sys/class/backlight/*; do" +
-            "  if [ -r \"$b/brightness\" ] && [ -r \"$b/max_brightness\" ]; then" +
-            "    cat \"$b/brightness\" \"$b/max_brightness\";" +
-            "    while inotifywait -qq -e modify \"$b/brightness\"; do" +
-            "      cat \"$b/brightness\";" +
-            "    done; exit;" +
-            "  fi;" +
-            "done"
-        ]
-        stdout: SplitParser {
-            onRead: function(data) {
-                const value = parseInt(data)
-                if (isNaN(value)) return
-
-                if (!root.brightnessReady) {
-                    if (root.brightnessReads === 0) {
-                        root.brightness      = value
-                        root.brightnessReads = 1
-                    } else {
-                        root.maxBrightness   = Math.max(1, value)
-                        root.brightnessReady = true
-                    }
-                    return
-                }
-
-                // Live brightness change → show notification (unless control center widget panel is open)
-                if (root.brightness !== value) {
-                    root.brightness = value
-                    if (!root.controlCenter || !root.controlCenter.open) {
-                        root.open = true
-                        autoDismiss.restart()
-                    }
+    Connections {
+        target: root.controlCenter
+        function onBrightnessLevelChanged() {
+            if (!root.controlCenter) return
+            const val = root.controlCenter.brightnessLevel
+            if (!root.initialized) {
+                root.brightnessLevel = val
+                root.initialized = true
+                return
+            }
+            if (root.brightnessLevel !== val) {
+                root.brightnessLevel = val
+                if (!root.controlCenter.open) {
+                    root.open = true
+                    autoDismiss.restart()
                 }
             }
         }
@@ -248,7 +227,7 @@ PanelWindow {
                         color: "#ffffff"
                         width: bTrack.width * root.brightnessLevel
                         Behavior on width {
-                            NumberAnimation { duration: 150; easing.type: Easing.OutQuart }
+                            NumberAnimation { duration: 80; easing.type: Easing.OutQuad }
                         }
                     }
                 }

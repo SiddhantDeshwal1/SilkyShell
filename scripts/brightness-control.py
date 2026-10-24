@@ -1,27 +1,22 @@
 #!/usr/bin/env python3
 """
-brightness-control.py — Precision smooth brightness manager for Quickshell & Hyprland.
+brightness-control.py — High-speed, responsive brightness manager for Quickshell & Hyprland.
 
-Supports:
-  - Discrete stepped control with a dedicated 'Display Off' level (0%) below min (10%).
-  - Smooth cinematic fading between off (0%) and on levels, without sleep/suspend.
-  - Subcommands:
-      get               Get current brightness percentage (0-100)
-      set <pct>         Set target brightness percentage (smooth fade to/from 0%)
-      step-down [amt]   Step down by amt (default 10). If at min (10%), steps to 0% (Display Off).
-      step-up [amt]     Step up by amt (default 10). If at 0% (Display Off), steps to min (10%).
-      toggle-off        Toggle between 0% (Display Off) and previous/default brightness.
+Features:
+  - Immediate 10-point stepping on keypress (zero lag, instant hardware update).
+  - True display power-off at level 0 via Hyprland DPMS + backlight unpowering.
+  - Automatically suppresses mouse_move_enables_dpms when display is turned off so
+    mouse jitter/touchpad drag does not immediately wake it up.
+  - Clean restore of DPMS and mouse wake settings when brightness is increased.
 """
 
 import os
 import sys
 import glob
-import time
-import signal
 import subprocess
 
-PID_FILE = "/tmp/quickshell_brightness_fade.pid"
 STATE_FILE = "/tmp/quickshell_brightness_last.txt"
+OFF_FILE = "/tmp/quickshell_display_is_off"
 
 def get_backlight_device():
     devices = glob.glob("/sys/class/backlight/*")
@@ -32,7 +27,13 @@ def get_backlight_device():
             return d
     return devices[0]
 
+def is_display_off():
+    return os.path.exists(OFF_FILE)
+
 def get_brightness_info():
+    if is_display_off():
+        return 0, 100, 0
+
     bdir = get_backlight_device()
     if bdir:
         try:
@@ -45,7 +46,6 @@ def get_brightness_info():
         except Exception:
             pass
 
-    # Fallback to brightnessctl
     try:
         out = subprocess.check_output(["brightnessctl", "-m"]).decode().strip()
         parts = out.split(",")
@@ -58,42 +58,11 @@ def get_brightness_info():
         pass
     return 0, 100, 0
 
-def kill_previous_transition():
-    if os.path.exists(PID_FILE):
-        try:
-            with open(PID_FILE, "r") as f:
-                old_pid = int(f.read().strip())
-            if old_pid != os.getpid():
-                os.kill(old_pid, signal.SIGTERM)
-        except Exception:
-            pass
-        try:
-            os.remove(PID_FILE)
-        except Exception:
-            pass
-
-def register_transition():
-    try:
-        with open(PID_FILE, "w") as f:
-            f.write(str(os.getpid()))
-    except Exception:
-        pass
-
-def cleanup_transition():
-    if os.path.exists(PID_FILE):
-        try:
-            with open(PID_FILE, "r") as f:
-                cur = int(f.read().strip())
-            if cur == os.getpid():
-                os.remove(PID_FILE)
-        except Exception:
-            pass
-
 def save_last_on_brightness(pct):
     if pct > 0:
         try:
             with open(STATE_FILE, "w") as f:
-                f.write(str(pct))
+                f.write(str(int(pct)))
         except Exception:
             pass
 
@@ -108,99 +77,92 @@ def get_last_on_brightness(default=50):
             pass
     return default
 
-def set_raw_pct(pct):
-    pct = max(0, min(100, int(round(pct))))
-    subprocess.run(["brightnessctl", "-q", "s", f"{pct}%"])
-
-def smooth_transition(start_pct, end_pct, duration=0.20, steps=10):
-    """
-    Executes a smooth cubic ease-in-out transition between start_pct and end_pct.
-    """
-    kill_previous_transition()
-    register_transition()
+def turn_display_off():
+    # 1. Mark state
     try:
-        if start_pct == end_pct:
-            set_raw_pct(end_pct)
-            return
+        with open(OFF_FILE, "w") as f:
+            f.write("1")
+    except Exception:
+        pass
 
-        interval = duration / max(1, steps)
-        for i in range(1, steps + 1):
-            t = i / steps
-            # Cubic ease-in-out curve
-            curve = t * t * (3 - 2 * t)
-            val = start_pct + (end_pct - start_pct) * curve
-            set_raw_pct(val)
-            if i < steps:
-                time.sleep(interval)
-        set_raw_pct(end_pct)
-    finally:
-        cleanup_transition()
+    # 2. Disable mouse_move_enables_dpms in Hyprland so releasing mouse / moving won't cancel off
+    subprocess.run(["hyprctl", "eval", "hl.config({ misc = { mouse_move_enables_dpms = false } })"], capture_output=True)
 
-def set_brightness(target_pct, smooth=None):
-    """
-    Sets target brightness. Automatically chooses smooth transition when
-    crossing the boundary between 0% (display off) and >0% (display on).
-    """
-    _, _, cur_pct = get_brightness_info()
-    target_pct = max(0, min(100, int(round(target_pct))))
+    # 3. Cut display power via DPMS (turns off all connected monitors: eDP-1, HDMI, etc.)
+    subprocess.run(["hyprctl", "dispatch", 'hl.dsp.dpms("off")'], capture_output=True)
 
-    if target_pct > 0:
-        save_last_on_brightness(target_pct)
+    # 4. Set backlight sysfs to 0
+    subprocess.run(["brightnessctl", "-q", "s", "0%"])
 
-    # If transitioning to 0 (display off) or from 0 (display on), always fade smoothly
-    is_power_boundary = (cur_pct == 0 and target_pct > 0) or (cur_pct > 0 and target_pct == 0)
-    
-    if smooth is True or (smooth is None and is_power_boundary):
-        smooth_transition(cur_pct, target_pct, duration=0.22, steps=10)
-    elif smooth is False:
-        kill_previous_transition()
-        set_raw_pct(target_pct)
+def turn_display_on(target_pct=10):
+    # 1. Clear off marker
+    if os.path.exists(OFF_FILE):
+        try:
+            os.remove(OFF_FILE)
+        except Exception:
+            pass
+
+    target_pct = max(10, min(100, int(round(target_pct))))
+
+    # 2. Turn DPMS on (powers on panels)
+    subprocess.run(["hyprctl", "dispatch", 'hl.dsp.dpms("on")'], capture_output=True)
+
+    # 3. Restore normal mouse_move_enables_dpms
+    subprocess.run(["hyprctl", "eval", "hl.config({ misc = { mouse_move_enables_dpms = true } })"], capture_output=True)
+
+    # 4. Set target backlight level
+    subprocess.run(["brightnessctl", "-q", "s", f"{target_pct}%"])
+    save_last_on_brightness(target_pct)
+
+def set_brightness(target_pct):
+    target = int(round(float(target_pct)))
+    if target <= 0:
+        turn_display_off()
     else:
-        # Standard adjustment: if delta is large, short micro-fade, else direct
-        delta = abs(target_pct - cur_pct)
-        if delta > 15:
-            smooth_transition(cur_pct, target_pct, duration=0.12, steps=6)
+        if is_display_off():
+            turn_display_on(target)
         else:
-            kill_previous_transition()
-            set_raw_pct(target_pct)
+            subprocess.run(["brightnessctl", "-q", "s", f"{target}%"])
+            save_last_on_brightness(target)
 
 def step_down(step=10):
-    _, _, cur_pct = get_brightness_info()
-    if cur_pct <= 0:
-        # Already at display off level
+    if is_display_off():
         return
+
+    _, _, cur_pct = get_brightness_info()
     if cur_pct <= step:
-        # At or below minimum on-level: step down to the new level below min (0% / Display Off)
-        smooth_transition(cur_pct, 0, duration=0.22, steps=10)
+        # At or below minimum level (e.g. 10%): turn display completely off
+        turn_display_off()
     else:
-        # Step down normally to next 10% interval
+        # Immediately drop 10 points
         target = max(step, round((cur_pct - step) / step) * step)
-        smooth_transition(cur_pct, target, duration=0.14, steps=7)
+        subprocess.run(["brightnessctl", "-q", "s", f"{target}%"])
         save_last_on_brightness(target)
 
 def step_up(step=10):
+    if is_display_off():
+        # Turn display back on immediately to minimum level (10%)
+        turn_display_on(step)
+        return
+
     _, _, cur_pct = get_brightness_info()
     if cur_pct <= 0:
-        # At display off level: turn back on smoothly to the minimum level (e.g. 10%)
-        target = step
-        smooth_transition(0, target, duration=0.22, steps=10)
-        save_last_on_brightness(target)
-    else:
-        # Step up normally to next 10% interval
-        target = min(100, round((cur_pct + step) / step) * step)
-        smooth_transition(cur_pct, target, duration=0.14, steps=7)
-        save_last_on_brightness(target)
+        turn_display_on(step)
+        return
+
+    # Immediately raise 10 points
+    target = min(100, round((cur_pct + step) / step) * step)
+    subprocess.run(["brightnessctl", "-q", "s", f"{target}%"])
+    save_last_on_brightness(target)
 
 def toggle_off():
-    _, _, cur_pct = get_brightness_info()
-    if cur_pct <= 0:
-        # Turn back on
+    if is_display_off():
         target = get_last_on_brightness(default=50)
-        smooth_transition(0, target, duration=0.22, steps=10)
+        turn_display_on(target)
     else:
-        # Turn display off
+        _, _, cur_pct = get_brightness_info()
         save_last_on_brightness(cur_pct)
-        smooth_transition(cur_pct, 0, duration=0.22, steps=10)
+        turn_display_off()
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] == "get":
@@ -213,7 +175,6 @@ def main():
         if len(sys.argv) >= 3:
             try:
                 val = float(sys.argv[2])
-                # If value is between 0 and 1, convert to 0-100
                 if 0.0 < val <= 1.0:
                     val = val * 100.0
                 set_brightness(val)

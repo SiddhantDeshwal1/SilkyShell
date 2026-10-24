@@ -1,13 +1,12 @@
+singleton Paths 1.0 Paths.qml
 singleton Theme 1.0 Theme.qml
 singleton AnimStyle 1.0 AnimStyle.qml
 singleton DynamicIslandService 1.0 DynamicIslandService.qml
 DynamicIslandBar 1.0 DynamicIslandBar.qml
 DynamicIslandOverlay 1.0 DynamicIslandOverlay.qml
-AudioWidget 1.0 AudioWidget.qml
 Bar 1.0 Bar.qml
 BatteryWidget 1.0 BatteryWidget.qml
 BrightnessNotification 1.0 BrightnessNotification.qml
-CallMode 1.0 CallMode.qml
 ClockWidget 1.0 ClockWidget.qml
 ConnectedDevicesWidget 1.0 ConnectedDevicesWidget.qml
 ControlCenter 1.0 ControlCenter.qml
@@ -17,15 +16,13 @@ LiquidGlassCard 1.0 LiquidGlassCard.qml
 MacSpinner 1.0 MacSpinner.qml
 MediaIsland 1.0 MediaIsland.qml
 MediaMenu 1.0 MediaMenu.qml
-MusicWidget 1.0 MusicWidget.qml
+MediaPlaybackWidget 1.0 MediaPlaybackWidget.qml
 NotificationWidget 1.0 NotificationWidget.qml
 OsdPill 1.0 OsdPill.qml
 ScreenTimeWidget 1.0 ScreenTimeWidget.qml
 PowerModeWidget 1.0 PowerModeWidget.qml
 StatusDevices 1.0 StatusDevices.qml
 SysStats 1.0 SysStats.qml
-TimerWidget 1.0 TimerWidget.qml
-TodoWidget 1.0 TodoWidget.qml
 Workspaces 1.0 Workspaces.qml
 Spotlight 1.0 Spotlight.qml
 SpotlightBar 1.0 SpotlightBar.qml
@@ -37,4 +34,5 @@ SpotlightWeb 1.0 SpotlightWeb.qml
 ScreenshotWidget 1.0 ScreenshotWidget.qml
 NotificationGroupCard 1.0 NotificationGroupCard.qml
 LiquidGlassBackground 1.0 LiquidGlassBackground.qml
+ScreenRecordingBar 1.0 ScreenRecordingBar.qml
 AltTabDock 1.0 AltTabDock.qml

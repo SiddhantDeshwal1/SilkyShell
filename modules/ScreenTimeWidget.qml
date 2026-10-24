@@ -15,9 +15,11 @@ import Quickshell.Io
 LiquidGlassCard {
     id: root
 
-    cardRadius: 35
+    cardRadius: 32
     implicitWidth: 182
-    implicitHeight: 70
+    implicitHeight: 156
+
+    readonly property bool isCompact: height < 110
 
     signal clicked()
 
@@ -59,6 +61,12 @@ LiquidGlassCard {
         }
     }
 
+    Process {
+        id: screentimeProc
+        command: ["python3", Paths.script("screentime.py"), "daemon"]
+        running: true
+    }
+
     Component.onCompleted: {
         root.updateFromJson(screentimeWatcher.text())
     }
@@ -66,7 +74,31 @@ LiquidGlassCard {
     // ── Main Widget Layout ────────────────────────────────────────────
     ColumnLayout {
         anchors.centerIn: parent
-        spacing: 5
+        spacing: root.isCompact ? 5 : 8
+
+        // 0. Header (shown in full 2x2 widget mode)
+        RowLayout {
+            Layout.alignment: Qt.AlignHCenter
+            spacing: 6
+            visible: !root.isCompact
+
+            Text {
+                text: "󰔚"
+                font.family: "JetBrainsMono NFP"
+                font.pixelSize: 15
+                color: "#a78bfa"
+                renderType: Text.NativeRendering
+            }
+
+            Text {
+                text: "Screen Time"
+                font.family: root.sfFont
+                font.pixelSize: 13
+                font.bold: true
+                color: "#ffffff"
+                renderType: Text.NativeRendering
+            }
+        }
 
         // 1. Time Display: e.g. "3h 11m"
         RowLayout {
@@ -179,6 +211,33 @@ LiquidGlassCard {
                 target: root
                 function onAppsChanged() { barCanvas.requestPaint() }
                 function onTotalSecondsChanged() { barCanvas.requestPaint() }
+            }
+        }
+
+        // 3. Top Apps (shown in full 2x2 widget mode)
+        ColumnLayout {
+            Layout.alignment: Qt.AlignHCenter
+            spacing: 3
+            visible: !root.isCompact && root.apps && root.apps.length > 0
+
+            Repeater {
+                model: (root.apps && root.apps.length > 0) ? Math.min(2, root.apps.length) : 0
+                RowLayout {
+                    spacing: 6
+                    Rectangle {
+                        width: 6
+                        height: 6
+                        radius: 3
+                        color: (root.apps && root.apps[index]) ? (root.apps[index].color || "#3b82f6") : "#3b82f6"
+                    }
+                    Text {
+                        text: (root.apps && root.apps[index]) ? ((root.apps[index].name || "App") + "  " + (root.apps[index].formatted || "")) : ""
+                        font.family: root.sfFont
+                        font.pixelSize: 11
+                        color: "#94a3b8"
+                        renderType: Text.NativeRendering
+                    }
+                }
             }
         }
     }

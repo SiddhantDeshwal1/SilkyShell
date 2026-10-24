@@ -24,6 +24,7 @@ Item {
     property real originY: root.height > 0 ? root.height / 2 : 35
     property real maxRadius: 200
     property real fluidPulse: 1.0
+    property bool enableWave: true
 
     // Set origin for liquid wave expansion (called from click handlers)
     function setClickPos(x, y) {
@@ -53,7 +54,7 @@ Item {
     }
 
     onTargetColorChanged: {
-        if (!root.visible || root.width <= 0) {
+        if (!root.enableWave || !root.visible || root.width <= 0) {
             fromColor = targetColor;
             toColor = targetColor;
             fillProgress = 1.0;
@@ -90,7 +91,7 @@ Item {
     }
 
     // ── Smooth Tactile Hydraulic Press + Fluid Impulse ───────────────
-    scale: (isPressed ? 0.965 : 1.0) * fluidPulse
+    scale: (isPressed ? 0.965 : 1.0) * (enableWave ? fluidPulse : 1.0)
     Behavior on scale {
         NumberAnimation {
             duration: root.isPressed ? 100 : 200
@@ -120,6 +121,7 @@ Item {
         id: liquidShader
         anchors.fill: parent
         fragmentShader: Qt.resolvedUrl("shaders/liquid_fill.frag.qsb")
+        visible: root.enableWave
 
         property real radius: root.cardRadius
         property vector2d size: Qt.vector2d(Math.max(1, root.width), Math.max(1, root.height))

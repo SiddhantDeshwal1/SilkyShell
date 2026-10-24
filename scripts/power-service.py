@@ -10,8 +10,11 @@ import os
 import sys
 import json
 import time
+import signal
+import fcntl
 import subprocess
 from pathlib import Path
+from qs_daemon_base import set_parent_death_signal
 
 # Paths
 RUN_DIR = Path(f"/run/user/{os.getuid()}") if hasattr(os, "getuid") else Path("/run/user/1000")
@@ -43,7 +46,7 @@ MODES = {
         "gradientEnd": "#e11d48",
         "icon": "󰓅",
         "description": "Redlining the APU (35W / 100°C)",
-        "levelIndex": 3
+        "levelIndex": 4
     },
     "performance": {
         "mode": "performance",
@@ -64,6 +67,27 @@ MODES = {
         "gradientEnd": "#ea580c",
         "icon": "󰈸",
         "description": "Maxing out the APU (30W / 100°C)",
+        "levelIndex": 3
+    },
+    "boost": {
+        "mode": "boost",
+        "name": "Boost",
+        "shortName": "Boost",
+        "tag": "High APU",
+        "wattage": "25W",
+        "temp": "100°C",
+        "stapmLimit": 25000,
+        "fastLimit": 25000,
+        "slowLimit": 25000,
+        "tempLimit": 100,
+        "governor": "performance",
+        "scheduler": "scx_bpfland",
+        "color": "#a855f7",
+        "glowColor": "rgba(168, 85, 247, 0.45)",
+        "gradientStart": "#c084fc",
+        "gradientEnd": "#9333ea",
+        "icon": "󰌠",
+        "description": "Boosting APU performance (25W / 100°C)",
         "levelIndex": 2
     },
     "balanced": {
@@ -72,11 +96,11 @@ MODES = {
         "shortName": "Bal",
         "tag": "Stock Limits",
         "wattage": "15W",
-        "temp": "90°C",
+        "temp": "100°C",
         "stapmLimit": 15000,
         "fastLimit": 15000,
         "slowLimit": 15000,
-        "tempLimit": 90,
+        "tempLimit": 100,
         "governor": "schedutil",
         "scheduler": "scx_rusty",
         "color": "#0ea5e9",
@@ -84,7 +108,7 @@ MODES = {
         "gradientStart": "#38bdf8",
         "gradientEnd": "#0284c7",
         "icon": "󰞬",
-        "description": "Restoring stock APU limits (15W / 90°C)",
+        "description": "Restoring stock APU limits (15W / 100°C)",
         "levelIndex": 1
     },
     "batterysaver": {
@@ -93,11 +117,11 @@ MODES = {
         "shortName": "Eco",
         "tag": "Longevity",
         "wattage": "10W",
-        "temp": "80°C",
+        "temp": "100°C",
         "stapmLimit": 10000,
         "fastLimit": 10000,
         "slowLimit": 10000,
-        "tempLimit": 80,
+        "tempLimit": 100,
         "governor": "powersave",
         "scheduler": "scx_lavd",
         "color": "#10b981",
@@ -105,7 +129,7 @@ MODES = {
         "gradientStart": "#34d399",
         "gradientEnd": "#059669",
         "icon": "󰌪",
-        "description": "Underclocking for longevity (10W / 80°C)",
+        "description": "Underclocking for longevity (10W / 100°C)",
         "levelIndex": 0
     }
 }
@@ -122,13 +146,15 @@ def normalize_mode(mode_str):
     if not mode_str:
         return "balanced"
     m = mode_str.lower().strip()
-    if m in ["peak", "extreme", "redline", "pwr", "max35"]:
+    if m in ["peak", "extreme", "redline", "pwr", "max35", "35w", "35"]:
         return "peak"
-    elif m in ["performance", "perf", "turbo", "max", "max30"]:
+    elif m in ["performance", "perf", "turbo", "max", "max30", "30w", "30"]:
         return "performance"
-    elif m in ["balanced", "bal", "normal", "stock", "default"]:
+    elif m in ["boost", "gaming", "game", "high", "max25", "25w", "25"]:
+        return "boost"
+    elif m in ["balanced", "bal", "normal", "stock", "default", "15w", "15"]:
         return "balanced"
-    elif m in ["batterysaver", "battery", "saver", "save", "eco", "powersave"]:
+    elif m in ["batterysaver", "battery", "saver", "save", "eco", "powersave", "10w", "10"]:
         return "batterysaver"
     return "balanced"
 
@@ -233,15 +259,34 @@ def reapply_active_mode():
     sys.stderr.flush()
     execute_pwr_system(curr)
     state = save_mode_state(curr)
-    sys.stdout.write(json.dumps(state) + "\n")
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(json.dumps(state) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        sys.exit(0)
 
 def run_daemon():
+    set_parent_death_signal()
+    # Acquire singleton lock
+    try:
+        lock_file = open("/tmp/quickshell_power.lock", "a+")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(f"{os.getpid()}\n")
+        lock_file.flush()
+    except (BlockingIOError, IOError):
+        sys.stderr.write("[PowerService] Another daemon instance is already running. Exiting.\n")
+        sys.exit(0)
+
     # Ensure initial state is written
     initial_mode = load_saved_mode()
     state = save_mode_state(initial_mode)
-    sys.stdout.write(json.dumps(state) + "\n")
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(json.dumps(state) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        sys.exit(0)
 
     try:
         import dbus
@@ -250,21 +295,39 @@ def run_daemon():
 
         DBusGMainLoop(set_as_default=True)
         bus = dbus.SystemBus()
+        loop = GLib.MainLoop()
+
+        # Exit instantly when Quickshell exits or pipe closes
+        GLib.io_add_watch(0, GLib.IOCondition.HUP | GLib.IOCondition.ERR, lambda *a: (loop.quit(), False)[1])
+        signal.signal(signal.SIGINT, lambda *a: loop.quit())
+        signal.signal(signal.SIGTERM, lambda *a: loop.quit())
+
+        # Debounce flag: prevents quadruple-fire when both PrepareForSleep
+        # and LidClosed signals fire simultaneously on lid open / resume.
+        _reapply_pending = [False]
+
+        def _schedule_reapply():
+            if not _reapply_pending[0]:
+                _reapply_pending[0] = True
+                def _do_reapply():
+                    _reapply_pending[0] = False
+                    reapply_active_mode()
+                    return False
+                GLib.timeout_add(900, _do_reapply)
+                # Second reapply at 2.5s for slow power management settling
+                GLib.timeout_add(2500, lambda: (reapply_active_mode(), False)[1])
 
         def on_sleep_changed(sleeping):
             if not sleeping:
                 # Resumed from sleep / suspend!
-                # Wait briefly for APU and power management to settle before reapplying
-                for delay in [800, 2200]:
-                    GLib.timeout_add(delay, lambda: (reapply_active_mode(), False)[1])
+                _schedule_reapply()
 
         def on_login1_prop_changed(iface, changed, invalidated):
             if "LidClosed" in changed:
                 lid_closed = bool(changed["LidClosed"])
                 if not lid_closed:
                     # Laptop lid was opened!
-                    for delay in [800, 2200]:
-                        GLib.timeout_add(delay, lambda: (reapply_active_mode(), False)[1])
+                    _schedule_reapply()
 
         try:
             bus.add_signal_receiver(

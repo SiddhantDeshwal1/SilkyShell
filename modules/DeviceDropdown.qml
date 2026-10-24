@@ -190,12 +190,35 @@ PanelWindow {
         })
     }
 
+    // Check if a video stream node represents a screen share rather than a camera
+    function isScreenShareStream(n) {
+        if (!n) return false
+        const p = n.properties || {}
+        const name = (n.name || p["node.name"] || "").toLowerCase()
+        const app = (p["application.name"] || "").toLowerCase()
+        const mediaName = (p["media.name"] || "").toLowerCase()
+        if (/xdph|portal|hyprland|screencast/.test(name) || /xdph|portal|hyprland|screencast/.test(app)) return true
+        if (mediaName.includes("screencast") || mediaName.includes("webrtc-consume-stream")) return true
+        const portalSources = root.getPortalScreenSource()
+        if (portalSources.length > 0) {
+            const target = p["node.target"] || p["target.node"]
+            for (let i = 0; i < portalSources.length; i++) {
+                if (target && target == portalSources[i].id) return true
+            }
+        }
+        return false
+    }
+
     function getCameraApps() {
-        return root.getVideoAppStreams()
+        return root.getVideoAppStreams().filter(function(n) {
+            return !root.isScreenShareStream(n)
+        })
     }
 
     function getScreenShares() {
-        const consumers = root.getVideoAppStreams()
+        const consumers = root.getVideoAppStreams().filter(function(n) {
+            return root.isScreenShareStream(n)
+        })
         if (consumers.length > 0) return consumers
         return root.getPortalScreenSource()
     }
@@ -669,17 +692,25 @@ PanelWindow {
                             // Thumb knob
                             Rectangle {
                                 id: volThumb
-                                width: 16
+                                width: volSliderMouse.pressed ? 26 : (volSliderMouse.containsMouse ? 24 : 22)
                                 height: 16
                                 radius: 8
                                 color: "#ffffff"
+                                border.color: volSliderMouse.pressed ? "#ffffff" : "#cbd5e1"
+                                border.width: 1.2
                                 anchors.verticalCenter: parent.verticalCenter
                                 x: {
                                     const src = Pipewire.defaultAudioSource
-                                    if (!src || !src.audio) return -8
-                                    return parent.width * Math.max(0, Math.min(1, src.audio.volume)) - 8
+                                    const vol = (src && src.audio) ? Math.max(0, Math.min(1, src.audio.volume)) : 0
+                                    return Math.max(0, Math.min(parent.width - width, parent.width * vol - width / 2))
                                 }
+                                opacity: 1.0
+                                scale: volSliderMouse.pressed ? 1.08 : (volSliderMouse.containsMouse ? 1.04 : 1.0)
+
+                                Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                                Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutBack } }
                                 Behavior on x {
+                                    enabled: !volSliderMouse.pressed
                                     NumberAnimation { duration: 80; easing.type: Easing.OutQuart }
                                 }
                             }
@@ -687,7 +718,9 @@ PanelWindow {
 
                         // Drag + scroll interaction
                         MouseArea {
+                            id: volSliderMouse
                             anchors.fill: parent
+                            hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             preventStealing: true
 

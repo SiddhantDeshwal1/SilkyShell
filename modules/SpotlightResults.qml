@@ -52,17 +52,30 @@ Item {
         }
     }
 
+    onResultsChanged: {
+        scrollAnim.stop();
+        flickable.contentY = 0;
+        targetContentY = 0;
+    }
+
     onSelectedIndexChanged: {
-        if (selectedIndex >= 0 && selectedIndex < root.results.length) {
+        if (selectedIndex <= 0) {
+            scrollAnim.stop();
+            targetContentY = 0;
+            flickable.contentY = 0;
+            return;
+        }
+        if (selectedIndex < root.results.length) {
             let itemTop = resultsColumn.topPadding + (selectedIndex * 66);
             let itemBottom = itemTop + 66;
+            let effectiveHeight = Math.max(flickable.height, root.contentHeightPixels);
             if (itemTop < flickable.contentY) {
                 targetContentY = Math.max(0, itemTop - 8);
                 scrollAnim.to = targetContentY;
                 scrollAnim.restart();
-            } else if (itemBottom > flickable.contentY + flickable.height) {
-                let maxScroll = Math.max(0, resultsColumn.height - flickable.height);
-                targetContentY = Math.min(maxScroll, itemBottom - flickable.height + 8);
+            } else if (itemBottom > flickable.contentY + effectiveHeight) {
+                let maxScroll = Math.max(0, resultsColumn.height - effectiveHeight);
+                targetContentY = Math.min(maxScroll, itemBottom - effectiveHeight + 8);
                 scrollAnim.to = targetContentY;
                 scrollAnim.restart();
             }
@@ -81,7 +94,11 @@ Item {
     property real contentHeightPixels: {
         if (!root.results || root.results.length === 0) return 0;
         let count = Math.min(root.results.length, 6);
-        return resultsColumn.topPadding + resultsColumn.bottomPadding + (count * 66);
+        if (root.results.length > 6) {
+            return resultsColumn.topPadding + (count * 66);
+        } else {
+            return resultsColumn.topPadding + (count * 66) + resultsColumn.bottomPadding;
+        }
     }
     width: parent.width
     height: contentHeightPixels
@@ -131,7 +148,7 @@ Item {
             id: resultsColumn
             width: parent.width
             topPadding: 8
-            bottomPadding: 16
+            bottomPadding: root.results && root.results.length > 6 ? 8 : 16
             leftPadding: 8
             rightPadding: 8
             spacing: 0
@@ -170,8 +187,8 @@ Item {
                             Image {
                                  anchors.fill: parent
                                  anchors.margins: 4
-                                 visible: modelData.iconPath !== undefined
-                                 source: modelData.iconPath ? modelData.iconPath : ""
+                                 visible: modelData.iconPath !== undefined && modelData.iconPath !== ""
+                                 source: (modelData.iconPath && modelData.iconPath !== "") ? modelData.iconPath : ""
                                  fillMode: Image.PreserveAspectFit
                                  sourceSize: Qt.size(48, 48)
                                  asynchronous: true
@@ -185,7 +202,7 @@ Item {
                                  font.family: "JetBrainsMono Nerd Font"
                                  font.pixelSize: 20
                                  color: Theme.darkMode ? "#ffffff" : "#000000"
-                                 visible: modelData.iconPath === undefined
+                                 visible: !modelData.iconPath || modelData.iconPath === ""
                             }
                         }
 
@@ -198,31 +215,65 @@ Item {
                                 text: modelData.label
                                 font.family: "SF Pro Text"
                                 font.bold: true
-                                font.pixelSize: 17
+                                font.pixelSize: 16
                                 color: "#ffffff"
+                                elide: Text.ElideRight
+                                width: parent.width
                             }
                             Text {
                                 text: modelData.description
                                 font.family: "SF Pro Text"
-                                font.pixelSize: 14
+                                font.pixelSize: 13
                                 color: "#cbd5e1"
                                 opacity: 0.85
+                                elide: Text.ElideRight
+                                width: parent.width
                             }
                         }
 
-                        // Chevron (visible on hover)
-                        Text {
-                            text: "󰅂"
-                            font.family: "JetBrainsMono Nerd Font"
-                            font.pixelSize: 22
-                            color: "#ffffff"
-                            x: (cardMouse.containsMouse || root.selectedIndex === index) ? 0 : -6
-                            opacity: cardMouse.containsMouse || root.selectedIndex === index ? 1.0 : 0.0
-                            Behavior on opacity {
-                                NumberAnimation { duration: 100 }
+                        // Badge Pill
+                        Rectangle {
+                            visible: modelData.badge !== undefined && modelData.badge !== ""
+                            Layout.preferredHeight: 22
+                            Layout.preferredWidth: badgeText.implicitWidth + 14
+                            radius: 11
+                            color: {
+                                if (modelData.badge === "Web" || modelData.badge === "Internet") return "#2238bdf8";
+                                if (modelData.badge === "App") return "#22a855f7";
+                                if (modelData.badge === "Related") return "#22818cf8";
+                                if (modelData.badge === "File") return "#2222c55e";
+                                if (modelData.badge === "Clip") return "#22eab308";
+                                if (modelData.badge === "Bookmark") return "#2206b6d4";
+                                return "#20ffffff";
                             }
-                            Behavior on x {
-                                NumberAnimation { duration: 100; easing.type: Easing.OutQuad }
+                            border.color: {
+                                if (modelData.badge === "Web" || modelData.badge === "Internet") return "#5538bdf8";
+                                if (modelData.badge === "App") return "#55a855f7";
+                                if (modelData.badge === "Related") return "#55818cf8";
+                                if (modelData.badge === "File") return "#5522c55e";
+                                if (modelData.badge === "Clip") return "#55eab308";
+                                if (modelData.badge === "Bookmark") return "#5506b6d4";
+                                return Theme.cardBorderColor;
+                            }
+                            border.width: 1
+                            antialiasing: true
+
+                            Text {
+                                id: badgeText
+                                anchors.centerIn: parent
+                                text: modelData.badge || ""
+                                font.family: "SF Pro Text"
+                                font.bold: true
+                                font.pixelSize: 11
+                                color: {
+                                    if (modelData.badge === "Web" || modelData.badge === "Internet") return "#7dd3fc";
+                                    if (modelData.badge === "App") return "#d8b4fe";
+                                    if (modelData.badge === "Related") return "#a5b4fc";
+                                    if (modelData.badge === "File") return "#86efac";
+                                    if (modelData.badge === "Clip") return "#fde047";
+                                    if (modelData.badge === "Bookmark") return "#67e8f9";
+                                    return "#e2e8f0";
+                                }
                             }
                         }
                     }

@@ -9,6 +9,10 @@ PanelWindow {
 
     property bool open: false
 
+    // Direct references wired from Bar.qml to avoid IPC subprocess overhead
+    property var controlCenter: null
+    property var notificationCenter: null
+
     anchors {
         top: true
         left: true
@@ -20,7 +24,7 @@ PanelWindow {
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.namespace: "quickshell-spotlight"
     WlrLayershell.keyboardFocus: root.open
-        ? WlrKeyboardFocus.Exclusive
+        ? WlrKeyboardFocus.OnDemand
         : WlrKeyboardFocus.None
 
     color: "transparent"
@@ -37,7 +41,11 @@ PanelWindow {
     }
 
     function openSpotlight() {
-        runShell("quickshell ipc call controlcenter close & quickshell ipc call notifications close &")
+        // Close sibling panels directly — no subprocess/IPC round-trip needed
+        if (root.controlCenter && typeof root.controlCenter.close === "function")
+            root.controlCenter.close()
+        if (root.notificationCenter && typeof root.notificationCenter.closePanel === "function")
+            root.notificationCenter.closePanel()
         root.open = true
         hideTimer.stop()
     }
@@ -58,7 +66,7 @@ PanelWindow {
 
     Timer {
         id: hideTimer
-        interval: 280 // Matches 250ms smooth exit animation
+        interval: 220 // Exactly covers 200ms reverse animation + 20ms buffer
         repeat: false
     }
 
@@ -80,23 +88,10 @@ PanelWindow {
                 event.accepted = true
                 return
             }
-            if (event.key === Qt.Key_1) {
-                spotlightBar.activateShortcut(0)
-                event.accepted = true
-                return
-            }
-            if (event.key === Qt.Key_2) {
-                spotlightBar.activateShortcut(1)
-                event.accepted = true
-                return
-            }
-            if (event.key === Qt.Key_3) {
-                spotlightBar.activateShortcut(2)
-                event.accepted = true
-                return
-            }
-            if (event.key === Qt.Key_4) {
-                spotlightBar.activateShortcut(3)
+            // Number key shortcuts (1-4) → activate shortcut at index
+            const numKey = event.key - Qt.Key_1
+            if (numKey >= 0 && numKey <= 3) {
+                spotlightBar.activateShortcut(numKey)
                 event.accepted = true
                 return
             }

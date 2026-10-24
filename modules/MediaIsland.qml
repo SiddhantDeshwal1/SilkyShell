@@ -16,7 +16,7 @@ import Quickshell.Services.Pipewire
 //   "idle"       → static "NOTHING" in red
 //   "announce"   → "NOW PLAYING" or "PAUSED" text, 2 s
 //   "title"      → "Artist – Title", 5 s
-//   "visualizer" → cava bars, 7 s  (alternates vertical ↔ symmetric)
+//   "visualizer" → cava bars, 45 s total (15 s each of 3 styles with smooth transition)
 //
 // VOLUME OSD:
 //   Any volume change interrupts → slides to live volume bar.
@@ -125,6 +125,7 @@ Item {
     property string currentPhase: "visualizer"
     property string savedPhase:   "visualizer"    // phase to restore after volume OSD
     property int    vizStyle:     0               // 0=vertical, 1=symmetric, 2=wave; cycles mod 3
+    property int    vizCycleCount: 0              // counts visualizer styles displayed in visualizer phase (1 to 3)
     property real   vizPhase:     0
 
     NumberAnimation on vizPhase {
@@ -177,6 +178,7 @@ Item {
             root.recentActiveDbusName = vp[0].dbusName
         }
         evaluatePlayerState()
+        updateIslandCenter()
     }
 
     // ── Cava data ─────────────────────────────────────────────────────
@@ -185,7 +187,7 @@ Item {
     Process {
         id: cavaProc
         running: true
-        command: ["cava", "-p", "/home/banana/.config/quickshell/scripts/cava-island.ini"]
+        command: ["cava", "-p", Paths.script("cava-island.ini")]
         onExited: function(code, status) {
             cavaRestartTimer.restart()
         }
@@ -303,7 +305,7 @@ Item {
         if (playerState === "idle") {
             currentPhase = "visualizer"
             slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
-            phaseTimer.interval = 8000
+            phaseTimer.interval = 15000
             phaseTimer.restart()
         } else {
             startLoop(playerState === "playing" ? "NEW" : "RESUME")
@@ -380,7 +382,7 @@ Item {
             phaseTimer.stop()
             currentPhase = "visualizer"
             slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
-            phaseTimer.interval = 8000
+            phaseTimer.interval = 15000
             phaseTimer.restart()
             return
         }
@@ -402,6 +404,7 @@ Item {
     }
 
     function startLoop(reason) {
+        vizCycleCount = 0
         phaseTimer.stop()
         currentPhase = "announce"
 
@@ -420,6 +423,8 @@ Item {
         if (newStyle === root.vizStyle) return
         if (currentPhase === "visualizer") {
             slideTo("visualizer", "", "#ffffff", true, newStyle)
+            phaseTimer.interval = 15000
+            phaseTimer.restart()
         } else {
             root.vizStyle = newStyle
         }
@@ -431,35 +436,47 @@ Item {
         if (currentPhase === "call") return     // call mode controls itself
 
         if (playerState === "idle") {
-            // When no music is playing, cycle through visualizer styles smoothly
+            // When no music is playing, cycle through visualizer styles smoothly (15s each)
             const nextStyle = (root.vizStyle + 1) % 3
             currentPhase = "visualizer"
             slideTo("visualizer", "", "#ffffff", true, nextStyle)
-            phaseTimer.interval = 8000
+            phaseTimer.interval = 15000
             phaseTimer.restart()
             return
         }
 
         if (playerState === "paused") {
             if (currentPhase === "announce") {
-                // "PAUSED" (2.5s) -> visualizer (8s)
+                // "PAUSED" (2.5s) -> visualizer style 1 (15s)
+                vizCycleCount = 1
                 currentPhase = "visualizer"
                 const nextStyle = (root.vizStyle + 1) % 3
                 slideTo("visualizer", "", "#ffffff", true, nextStyle)
-                phaseTimer.interval = 8000
+                phaseTimer.interval = 15000
                 phaseTimer.restart()
             } else if (currentPhase === "visualizer") {
-                // visualizer (8s) -> title (5s)
-                currentPhase = "title"
-                slideTo("title", root.trackDisplay, "#ffffff", false)
-                phaseTimer.interval = 5000
-                phaseTimer.restart()
+                if (vizCycleCount < 3) {
+                    // Stay in visualizer: switch to next visualizer style for another 15s (smooth transition)
+                    vizCycleCount++
+                    const nextStyle = (root.vizStyle + 1) % 3
+                    slideTo("visualizer", "", "#ffffff", true, nextStyle)
+                    phaseTimer.interval = 15000
+                    phaseTimer.restart()
+                } else {
+                    // Completed 3 visualizer styles (45s total) -> title (5s)
+                    vizCycleCount = 0
+                    currentPhase = "title"
+                    slideTo("title", root.trackDisplay, "#ffffff", false)
+                    phaseTimer.interval = 5000
+                    phaseTimer.restart()
+                }
             } else {
-                // title (5s) -> visualizer (8s)
+                // title (5s) -> visualizer style 1 (15s)
+                vizCycleCount = 1
                 currentPhase = "visualizer"
                 const nextStyle = (root.vizStyle + 1) % 3
                 slideTo("visualizer", "", "#ffffff", true, nextStyle)
-                phaseTimer.interval = 8000
+                phaseTimer.interval = 15000
                 phaseTimer.restart()
             }
             return
@@ -467,21 +484,32 @@ Item {
 
         if (playerState === "playing") {
             if (currentPhase === "announce" || currentPhase === "title") {
-                // → visualizer (cycle through 3 styles)
+                // → visualizer style 1 (15s)
+                vizCycleCount = 1
                 const nextStyle = (root.vizStyle + 1) % 3
                 currentPhase = "visualizer"
                 slideTo("visualizer", "", "#ffffff", true, nextStyle)
-                phaseTimer.interval = 7000
+                phaseTimer.interval = 15000
                 phaseTimer.restart()
             } else if (currentPhase === "visualizer") {
-                // → title
-                currentPhase = "title"
-                slideTo("title",
-                        root.trackDisplay,
-                        "#ffffff",
-                        false)
-                phaseTimer.interval = 5000
-                phaseTimer.restart()
+                if (vizCycleCount < 3) {
+                    // Stay in visualizer: switch to next visualizer style for another 15s (smooth transition)
+                    vizCycleCount++
+                    const nextStyle = (root.vizStyle + 1) % 3
+                    slideTo("visualizer", "", "#ffffff", true, nextStyle)
+                    phaseTimer.interval = 15000
+                    phaseTimer.restart()
+                } else {
+                    // Completed 3 visualizer styles (45s total) -> title (5s)
+                    vizCycleCount = 0
+                    currentPhase = "title"
+                    slideTo("title",
+                            root.trackDisplay,
+                            "#ffffff",
+                            false)
+                    phaseTimer.interval = 5000
+                    phaseTimer.restart()
+                }
             }
         }
     }
@@ -489,7 +517,7 @@ Item {
     // Phase advancement timer
     Timer {
         id: phaseTimer
-        interval: 8000
+        interval: 15000
         running: true
         repeat: false
         onTriggered: root.advancePhase()
@@ -572,7 +600,7 @@ Item {
                 root.currentPhase = "visualizer"
                 root.slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
                 root.savedPhase = "visualizer"
-                phaseTimer.interval = 8000
+                phaseTimer.interval = 15000
                 phaseTimer.restart()
                 return
             }
@@ -612,12 +640,15 @@ Item {
     function slideTo(phase, label, color, isViz, targetVizStyle) {
         if (animating) {
             slideAnim.stop()
+            crossFadeAnim.stop()
             onSlideComplete()
         }
 
         const desiredStyle = (targetVizStyle !== undefined) ? targetVizStyle : root.vizStyle
+        const outgoingIsViz = (activeSlot === 0 ? slotAViz.visible : slotBViz.visible)
+        const isVizToViz = outgoingIsViz && isViz && (phase === "visualizer")
 
-        // Set up the INCOMING (off-screen) slot
+        // Set up the INCOMING slot
         if (activeSlot === 0) {
             // slotB becomes incoming
             slotBTitle.reset()
@@ -635,6 +666,14 @@ Item {
             if (isViz) slotBViz.requestPaint()
             slotBVol.visible    = (phase === "volume")
             slotBCall.visible   = (phase === "call")
+
+            if (isVizToViz) {
+                slotB.y = 0
+                slotB.opacity = 0
+            } else {
+                slotB.y = root.height
+                slotB.opacity = 0
+            }
         } else {
             // slotA becomes incoming
             slotATitle.reset()
@@ -652,10 +691,22 @@ Item {
             if (isViz) slotAViz.requestPaint()
             slotAVol.visible    = (phase === "volume")
             slotACall.visible   = (phase === "call")
+
+            if (isVizToViz) {
+                slotA.y = 0
+                slotA.opacity = 0
+            } else {
+                slotA.y = root.height
+                slotA.opacity = 0
+            }
         }
 
         animating = true
-        slideAnim.start()
+        if (isVizToViz) {
+            crossFadeAnim.start()
+        } else {
+            slideAnim.start()
+        }
     }
 
     // After the animation completes, swap which slot is "active"
@@ -665,6 +716,9 @@ Item {
 
         if (activeSlot === 0) {
             root.vizStyle = slotA.slotVizStyle
+            slotA.y = 0
+            slotA.opacity = 1
+            slotB.opacity = 0
             slotBTitle.reset()
             slotBViz.visible = false
             slotBVol.visible = false
@@ -677,6 +731,9 @@ Item {
             }
         } else {
             root.vizStyle = slotB.slotVizStyle
+            slotB.y = 0
+            slotB.opacity = 1
+            slotA.opacity = 0
             slotATitle.reset()
             slotAViz.visible = false
             slotAVol.visible = false
@@ -688,6 +745,28 @@ Item {
                 slotBTitleAnim.restart()
             }
         }
+    }
+
+    // Smooth Cross-Fade Dissolve for Visualizer-to-Visualizer Style Changes
+    ParallelAnimation {
+        id: crossFadeAnim
+
+        NumberAnimation {
+            target: root.activeSlot === 0 ? slotA : slotB
+            property: "opacity"
+            from: 1; to: 0
+            duration: 500
+            easing.type: Easing.InOutQuad
+        }
+        NumberAnimation {
+            target: root.activeSlot === 0 ? slotB : slotA
+            property: "opacity"
+            from: 0; to: 1
+            duration: 500
+            easing.type: Easing.InOutQuad
+        }
+
+        onFinished: root.onSlideComplete()
     }
 
     // ── Parallel animation: outgoing exits up, incoming enters from below ──
@@ -1522,7 +1601,7 @@ Item {
         }
         const p = root.activePlayer ? (root.activePlayer.dbusName || "") : ""
         islandCmdProc.running = false
-        islandCmdProc.command = ["/home/banana/.config/quickshell/scripts/media-control.sh", action, p]
+        islandCmdProc.command = [Paths.script("media-control.sh"), action, p]
         islandCmdProc.running = true
     }
 
@@ -1536,6 +1615,22 @@ Item {
 
     property bool mouseInIsland: false
 
+    property real islandCenterX: Screen.width / 2
+
+    function updateIslandCenter() {
+        if (root.width > 0) {
+            const pt = root.mapToItem(null, root.width / 2, 0)
+            if (pt && !isNaN(pt.x) && pt.x > 0) {
+                root.islandCenterX = pt.x
+            } else if (root.x > 0) {
+                root.islandCenterX = root.x + root.width / 2
+            }
+        }
+    }
+
+    onXChanged: updateIslandCenter()
+    onWidthChanged: updateIslandCenter()
+
     MediaMenu {
         id: mediaMenu
         activePlayer: root.activePlayer
@@ -1543,10 +1638,7 @@ Item {
         vizStyle: root.vizStyle
         islandVol: root.islandVol
         islandMuted: root.islandMuted
-        islandCenterX: {
-            const pt = root.mapToItem(null, root.width / 2, 0)
-            return pt ? pt.x : Screen.width / 2
-        }
+        islandCenterX: root.islandCenterX
 
         onChangeVizStyle: function(newStyle) {
             root.switchVizStyle(newStyle)
@@ -1558,6 +1650,13 @@ Item {
         }
     }
 
+    Connections {
+        target: mediaMenu
+        function onOpenChanged() {
+            if (mediaMenu.open) root.updateIslandCenter()
+        }
+    }
+
     MouseArea {
         id: islandMouseArea
         anchors.fill: parent
@@ -1566,9 +1665,8 @@ Item {
         cursorShape: Qt.PointingHandCursor
 
         onEntered: {
+            root.updateIslandCenter()
             root.mouseInIsland = true
-            const pt = root.mapToItem(null, root.width / 2, 0)
-            if (pt) mediaMenu.islandCenterX = pt.x
         }
 
         onExited: {
@@ -1576,9 +1674,8 @@ Item {
         }
 
         onClicked: function(mouse) {
+            root.updateIslandCenter()
             if (mouse.button === Qt.LeftButton) {
-                const pt = root.mapToItem(null, root.width / 2, 0)
-                if (pt) mediaMenu.islandCenterX = pt.x
                 if (mediaMenu.open) {
                     mediaMenu.close()
                 } else {

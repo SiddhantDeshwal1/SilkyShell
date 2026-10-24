@@ -530,7 +530,7 @@ PanelWindow {
         property string pendingPlayer: ""
         property string pendingVol: "1.0"
         onTriggered: {
-            volumeProc.command = ["/home/banana/.config/quickshell/scripts/media-control.sh", "set-volume", pendingPlayer, pendingVol]
+            volumeProc.command = [Paths.script("media-control.sh"), "set-volume", pendingPlayer, pendingVol]
             volumeProc.running = true
         }
     }
@@ -573,7 +573,7 @@ PanelWindow {
         property string pendingPlayer: ""
         property string pendingPos: "0"
         onTriggered: {
-            seekProc.command = ["/home/banana/.config/quickshell/scripts/media-control.sh", "set-position", pendingPlayer, pendingPos]
+            seekProc.command = [Paths.script("media-control.sh"), "set-position", pendingPlayer, pendingPos]
             seekProc.running = true
         }
     }
@@ -653,9 +653,35 @@ PanelWindow {
     }
 
     function queryPlayerInfo() {
-        const p = root.effectivePlayer ? (root.effectivePlayer.dbusName || "") : ""
-        if (p && !playerInfoProc.running) {
-            playerInfoProc.command = ["/home/banana/.config/quickshell/scripts/media-control.sh", "get-info", p]
+        if (!root.effectivePlayer) return
+        const p = root.effectivePlayer
+
+        // Native Quickshell Mpris properties (0 subprocess overhead)
+        if (p.length !== undefined && p.length > 0) {
+            root.playerLength = p.length
+        }
+
+        const now = Date.now()
+        const timeSinceSeek = now - root.lastSeekTime
+        const seekingRecent = root.lastSeekTime > 0 && (timeSinceSeek < 1200)
+
+        if (!root.isScrubbing && !root.trackChanging) {
+            let pos = (p.positionSupported && p.position !== undefined) ? p.position : 0
+            if (pos > 0 || !seekingRecent) {
+                root.lastSyncPos = pos
+                root.lastSyncTime = now
+                root.playerPos = pos
+                if (seekingRecent) root.lastSeekTime = 0
+            }
+        }
+
+        if (p.volume !== undefined && typeof playerVolSliderItem !== "undefined" && !playerVolSliderItem.sliderPressed) {
+            root.playerVol = p.volume
+        }
+
+        // Optional fallback: only if player does not support native position
+        if (!p.positionSupported && p.dbusName && !playerInfoProc.running) {
+            playerInfoProc.command = [Paths.script("media-control.sh"), "get-info", p.dbusName]
             playerInfoProc.running = true
         }
     }
@@ -752,7 +778,7 @@ PanelWindow {
         }
         root.pendingColorUrl = url
         if (colorExtractProc.running) colorExtractProc.running = false
-        colorExtractProc.command = ["python3", "/home/banana/.config/quickshell/scripts/extract-colors.py", url]
+        colorExtractProc.command = ["python3", Paths.script("extract-colors.py"), url]
         colorExtractProc.running = true
     }
 
@@ -821,7 +847,7 @@ PanelWindow {
         property string pendingAction: ""
         property string pendingPlayer: ""
         onTriggered: {
-            mediaActionProc.command = ["/home/banana/.config/quickshell/scripts/media-control.sh", pendingAction, pendingPlayer]
+            mediaActionProc.command = [Paths.script("media-control.sh"), pendingAction, pendingPlayer]
             mediaActionProc.running = true
         }
     }
@@ -852,7 +878,7 @@ PanelWindow {
         }
         if (!handled) {
             const p = root.effectivePlayer ? (root.effectivePlayer.dbusName || "") : ""
-            root.runCmd(["/home/banana/.config/quickshell/scripts/media-control.sh", action, p])
+            root.runCmd([Paths.script("media-control.sh"), action, p])
         }
     }
 
@@ -1002,14 +1028,14 @@ PanelWindow {
             return Math.max(minX, Math.min(maxX, targetX))
         }
         anchors.top: parent.top
+        anchors.topMargin: 8
 
         width: 780
         implicitHeight: contentCol.implicitHeight + 32
 
-        // Top corners gently rounded (10px outward-leaning feel);
-        // bottom corners morph with spring expansion
-        topLeftRadius: 10
-        topRightRadius: 10
+        // Top and bottom corners morph with spring expansion
+        topLeftRadius: 18 + Math.round(4 * root.animProgress)
+        topRightRadius: 18 + Math.round(4 * root.animProgress)
         bottomLeftRadius: 18 + Math.round(4 * root.animProgress)
         bottomRightRadius: 18 + Math.round(4 * root.animProgress)
 
@@ -1052,8 +1078,8 @@ PanelWindow {
         // Specular shine top gradient overlay
         Rectangle {
             anchors.fill: parent
-            topLeftRadius: 10
-            topRightRadius: 10
+            topLeftRadius: 18 + Math.round(4 * root.animProgress)
+            topRightRadius: 18 + Math.round(4 * root.animProgress)
             bottomLeftRadius: 22
             bottomRightRadius: 22
             z: 0
@@ -1068,8 +1094,8 @@ PanelWindow {
         Rectangle {
             anchors.fill: parent
             anchors.margins: 1
-            topLeftRadius: 9
-            topRightRadius: 9
+            topLeftRadius: 17 + Math.round(4 * root.animProgress)
+            topRightRadius: 17 + Math.round(4 * root.animProgress)
             bottomLeftRadius: 21
             bottomRightRadius: 21
             z: 0
@@ -1818,13 +1844,23 @@ PanelWindow {
                                     // Handle Knob
                                     Rectangle {
                                         id: menuVolHandle
-                                        width: 16; height: 16
+                                        width: volSliderMouse.pressed ? 26 : (volSliderMouse.containsMouse ? 24 : 22)
+                                        height: 16
                                         radius: 8
                                         color: "#ffffff"
+                                        border.color: root.islandMuted ? "#94a3b8" : (volSliderMouse.pressed ? "#ffffff" : "#cbd5e1")
+                                        border.width: 1.2
                                         anchors.verticalCenter: parent.verticalCenter
                                         x: Math.max(0, Math.min(parent.width - width, parent.width * volSliderItem.fillFraction - width / 2))
-                                        scale: volSliderItem.sliderPressed ? 1.25 : 1.0
-                                        Behavior on scale { NumberAnimation { duration: 120 } }
+                                        opacity: 1.0
+                                        scale: volSliderMouse.pressed ? 1.08 : (volSliderMouse.containsMouse ? 1.04 : 1.0)
+
+                                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                                        Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutBack } }
+                                        Behavior on x {
+                                            enabled: !volSliderMouse.pressed
+                                            NumberAnimation { duration: 80; easing.type: Easing.OutQuad }
+                                        }
                                     }
                                 }
 

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
+import "SpotlightSemantic.js" as Semantic
 
 Item {
     id: root
@@ -40,27 +41,13 @@ Item {
     }
 
     readonly property var appsList: {
-        let q = filterQuery.trim().toLowerCase();
+        let q = filterQuery.trim();
         if (q === "") return root.allApps;
+        let matches = Semantic.searchApps(q, root.allApps, 50, 50);
         let list = [];
-        let source = root.allApps;
-        for (let i = 0; i < source.length; i++) {
-            let app = source[i];
-            if (!app || !app.name) continue;
-            let name = (app.name || "").toLowerCase();
-            let comment = (app.comment || "").toLowerCase();
-            let id = (app.id || "").toLowerCase();
-            let generic = (app.genericName || "").toLowerCase();
-            if (name.indexOf(q) !== -1 || comment.indexOf(q) !== -1 || id.indexOf(q) !== -1 || generic.indexOf(q) !== -1) {
-                list.push(app);
-            }
+        for (let i = 0; i < matches.length; i++) {
+            list.push(matches[i].app);
         }
-        list.sort((a, b) => {
-            let aStarts = (a.name || "").toLowerCase().startsWith(q) ? 1 : 0;
-            let bStarts = (b.name || "").toLowerCase().startsWith(q) ? 1 : 0;
-            if (aStarts !== bStarts) return bStarts - aStarts;
-            return (a.name || "").localeCompare(b.name || "");
-        });
         return list;
     }
 

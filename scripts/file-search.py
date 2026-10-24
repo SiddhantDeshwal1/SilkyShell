@@ -10,6 +10,10 @@ import json
 import urllib.parse
 import xml.etree.ElementTree as ET
 import subprocess
+import shutil
+
+# Find fd binary at import time — fall back to find(1) if unavailable
+_FD_BIN = shutil.which("fd") or shutil.which("fdfind")
 
 def get_username():
     return os.getenv("USER") or os.getenv("LOGNAME") or "banana"
@@ -61,6 +65,9 @@ def get_drive_tag(path):
         return "External"
     return "OS"
 
+# Module-level cache for recently-used.xbel to avoid re-parsing on every call
+_xbel_cache = {"mtime": -1.0, "items": []}
+
 def get_recent(drive_id="all", max_results=10):
     user = get_username()
     home = os.path.expanduser("~")
@@ -70,22 +77,29 @@ def get_recent(drive_id="all", max_results=10):
     results = []
     seen = set()
     
-    # 1. Check Freedesktop recently-used.xbel
+    # 1. Check Freedesktop recently-used.xbel (with mtime-based parse cache)
     xbel = os.path.join(home, ".local/share/recently-used.xbel")
     if os.path.exists(xbel):
         try:
-            tree = ET.parse(xbel)
-            root = tree.getroot()
-            items = []
-            for bm in root.findall("bookmark"):
-                href = bm.get("href", "")
-                mod = bm.get("modified", "")
-                if href.startswith("file://"):
-                    p = urllib.parse.unquote(href[7:])
-                    if p not in seen:
-                        items.append((mod, p))
-            items.sort(reverse=True)
-            for _, p in items:
+            xbel_mtime = os.path.getmtime(xbel)
+            if xbel_mtime != _xbel_cache["mtime"]:
+                # File changed — reparse
+                tree = ET.parse(xbel)
+                xbel_root = tree.getroot()
+                parsed_items = []
+                for bm in xbel_root.findall("bookmark"):
+                    href = bm.get("href", "")
+                    mod = bm.get("modified", "")
+                    if href.startswith("file://"):
+                        p = urllib.parse.unquote(href[7:])
+                        parsed_items.append((mod, p))
+                parsed_items.sort(reverse=True)
+                _xbel_cache["mtime"] = xbel_mtime
+                _xbel_cache["items"] = parsed_items
+            cached_items = _xbel_cache["items"]
+            for _, p in cached_items:
+                if p in seen:
+                    continue
                 if not os.path.exists(p):
                     continue
                 seen.add(p)
@@ -172,27 +186,40 @@ def search_files(query, drive_id="all", max_results=10):
     if not targets or not query.strip():
         return
 
-    cmd = [
-        "fd",
-        "--max-results", str(max_results),
-        "-i",
-        "-E", ".cache",
-        "-E", ".git",
-        "-E", "node_modules",
-        "-E", ".cargo",
-        "-E", ".npm",
-        "-E", ".local",
-        "-E", "__pycache__",
-        "-E", ".rustup",
-        "--type", "f",
-        "--type", "d",
-        query.strip()
-    ] + targets
+    if _FD_BIN:
+        cmd = [
+            _FD_BIN,
+            "--max-results", str(max_results),
+            "-i",
+            "-E", ".cache",
+            "-E", ".git",
+            "-E", "node_modules",
+            "-E", ".cargo",
+            "-E", ".npm",
+            "-E", ".local",
+            "-E", "__pycache__",
+            "-E", ".rustup",
+            "--type", "f",
+            "--type", "d",
+            query.strip()
+        ] + targets
+    else:
+        # Fallback to POSIX find(1) when fd/fdfind is not installed
+        excludes = ["-not", "-path", "*/.git/*",
+                    "-not", "-path", "*/.cache/*",
+                    "-not", "-path", "*/node_modules/*",
+                    "-not", "-path", "*/__pycache__/*",
+                    "-not", "-path", "*/.local/*"]
+        cmd = ["find"] + targets + ["-maxdepth", "8",
+               "(", "-iname", f"*{query.strip()}*", ")"] + excludes
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3.0)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=4.0)
         lines = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
+        count = 0
         for p in lines:
+            if count >= max_results:
+                break
             item = {
                 "action": "file",
                 "id": f"file_{p}",
@@ -203,6 +230,7 @@ def search_files(query, drive_id="all", max_results=10):
                 "path": p
             }
             print(json.dumps(item, ensure_ascii=False))
+            count += 1
     except Exception:
         pass
 

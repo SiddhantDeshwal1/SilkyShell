@@ -10,11 +10,13 @@ import json
 import subprocess
 import os
 import signal
+import fcntl
 import time
 import dbus
 import dbus.service
 import dbus.mainloop.glib
 from gi.repository import GLib
+from qs_daemon_base import set_parent_death_signal
 
 def get_dbus_system():
     try:
@@ -226,9 +228,25 @@ def disconnect_wifi():
     subprocess.run(["sh", "-c", "nmcli dev disconnect $(nmcli -t -f DEVICE,TYPE dev 2>/dev/null | grep ':wifi$' | cut -d: -f1 | head -n 1)"], capture_output=True)
 
 def run_stream_daemon():
+    set_parent_death_signal()
+    # Acquire singleton lock
+    try:
+        lock_file = open("/tmp/quickshell_network.lock", "a+")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(f"{os.getpid()}\n")
+        lock_file.flush()
+    except (BlockingIOError, IOError):
+        sys.stderr.write("[NetworkService] Another daemon instance is already running. Exiting.\n")
+        sys.exit(0)
+
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-    bus = dbus.SystemBus()
+    bus = get_dbus_system()
     loop = GLib.MainLoop()
+
+    # Exit instantly when Quickshell exits or pipe closes
+    GLib.io_add_watch(0, GLib.IOCondition.HUP | GLib.IOCondition.ERR, lambda *a: (loop.quit(), False)[1])
 
     last_state = [None]
     pending_emit = [False]
@@ -242,6 +260,9 @@ def run_stream_daemon():
                 last_state[0] = encoded
                 sys.stdout.write(encoded + "\n")
                 sys.stdout.flush()
+        except BrokenPipeError:
+            loop.quit()
+            return False
         except Exception:
             pass
         return False
@@ -317,8 +338,8 @@ def run_stream_daemon():
     except Exception:
         pass
 
-    # Periodic heartbeat (every 3 seconds) to ensure 100% sync
-    GLib.timeout_add_seconds(3, lambda: (emit_state(force=False), True)[1])
+    # Periodic heartbeat — long interval since D-Bus signals handle real-time changes
+    GLib.timeout_add_seconds(30, lambda: (emit_state(force=False), True)[1])
 
     def sig_handler(*args):
         loop.quit()

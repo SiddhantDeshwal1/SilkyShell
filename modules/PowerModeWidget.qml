@@ -6,8 +6,9 @@ import Quickshell.Io
 // ─────────────────────────────────────────────────────────────────────────────
 // PowerModeWidget — macOS / iOS Style APU Power Capsule (182x70, radius 35).
 // Modes:
-//   - Battery Saver (10W / 80°C | powersave | scx_lavd)
-//   - Balanced      (15W / 90°C | schedutil | scx_rusty)
+//   - Battery Saver (10W / 100°C | powersave | scx_lavd)
+//   - Balanced      (15W / 100°C | schedutil | scx_rusty)
+//   - Boost         (25W / 100°C | performance | scx_bpfland)
 //   - Performance   (30W / 100°C | performance | scx_bpfland)
 //   - Peak          (35W / 100°C | performance | scx_bpfland)
 // Features:
@@ -43,10 +44,10 @@ LiquidGlassCard {
     property string modeName: "Balanced"
     property string shortName: "Bal"
     property string wattage: "15W"
-    property string temp: "90°C"
+    property string temp: "100°C"
     property string iconStr: "󰞬"
     property color  modeColor: "#0ea5e9"
-    property int    levelIndex: 1 // 0: Eco, 1: Bal, 2: Perf, 3: Peak
+    property int    levelIndex: 1 // 0: Eco, 1: Bal, 2: Boost, 3: Perf, 4: Peak
     property bool   pendingCommit: debounceTimer.running || committingGuardTimer.running
 
     isActive: true
@@ -57,6 +58,7 @@ LiquidGlassCard {
         switch (currentMode) {
             case "peak":         return Qt.rgba(0.96, 0.25, 0.38, 0.28);
             case "performance":  return Qt.rgba(0.98, 0.45, 0.09, 0.26);
+            case "boost":        return Qt.rgba(0.66, 0.33, 0.97, 0.26);
             case "balanced":     return Qt.rgba(0.06, 0.65, 0.91, 0.26);
             case "batterysaver": return Qt.rgba(0.06, 0.72, 0.51, 0.26);
             default:             return Qt.rgba(0.06, 0.65, 0.91, 0.26);
@@ -67,10 +69,11 @@ LiquidGlassCard {
 
     // ── Cyclic Modes Definition (High-Tech Vector Glyphs) ─────────────
     readonly property var modeList: [
-        { key: "batterysaver", name: "Battery Saver", short: "Eco",  watt: "10W", temp: "80°C",  icon: "󰌪", col: "#10b981", idx: 0 },
-        { key: "balanced",     name: "Balanced",      short: "Bal",  watt: "15W", temp: "90°C",  icon: "󰞬", col: "#0ea5e9", idx: 1 },
-        { key: "performance",  name: "Performance",   short: "Perf", watt: "30W", temp: "100°C", icon: "󰈸", col: "#f97316", idx: 2 },
-        { key: "peak",         name: "Peak",          short: "Peak", watt: "35W", temp: "100°C", icon: "󰓅", col: "#f43f5e", idx: 3 }
+        { key: "batterysaver", name: "Battery Saver", short: "Eco",   watt: "10W", temp: "100°C", icon: "󰌪", col: "#10b981", idx: 0 },
+        { key: "balanced",     name: "Balanced",      short: "Bal",   watt: "15W", temp: "100°C", icon: "󰞬", col: "#0ea5e9", idx: 1 },
+        { key: "boost",        name: "Boost",         short: "Boost", watt: "25W", temp: "100°C", icon: "󰌠", col: "#a855f7", idx: 2 },
+        { key: "performance",  name: "Performance",   short: "Perf",  watt: "30W", temp: "100°C", icon: "󰈸", col: "#f97316", idx: 3 },
+        { key: "peak",         name: "Peak",          short: "Peak",  watt: "35W", temp: "100°C", icon: "󰓅", col: "#f43f5e", idx: 4 }
     ]
 
     onActiveModeChanged: {
@@ -222,6 +225,8 @@ LiquidGlassCard {
                 renderType: Text.QtRendering
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.alignment: Qt.AlignLeft
+                horizontalAlignment: Text.AlignLeft
             }
 
             // Wattage (13px bold matching other capsule subtitles)
@@ -232,6 +237,9 @@ LiquidGlassCard {
                 font.bold: true
                 color: root.modeColor
                 renderType: Text.QtRendering
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignLeft
+                horizontalAlignment: Text.AlignLeft
 
                 Behavior on color { ColorAnimation { duration: 240; easing.type: Easing.OutCubic } }
             }

@@ -25,11 +25,43 @@ import Quickshell.Services.Pipewire
 RowLayout {
     id: root
     Layout.fillHeight: true
+    Layout.alignment: Qt.AlignVCenter
+    Layout.preferredWidth: implicitWidth
     spacing: 3
 
     property bool micActive: false
     property bool cameraActive: false
     property bool screenshareActive: false
+    property bool screenRecordingActive: false
+    property bool v4l2CameraActive: false
+    property bool pipewireCameraActive: false
+
+    IpcHandler {
+        target: "statusdevices"
+        function setRecording(active: bool) {
+            root.screenRecordingActive = !!active
+        }
+    }
+
+    FileView {
+        id: recStateFile
+        path: "/tmp/qs_recording.json"
+        watchChanges: true
+        onFileChanged: root.checkRecordingState()
+        onLoadedChanged: root.checkRecordingState()
+    }
+
+    function checkRecordingState() {
+        try {
+            const txt = recStateFile.text()
+            if (txt && txt.trim().length > 0) {
+                const data = JSON.parse(txt.trim())
+                root.screenRecordingActive = !!data.isRecording
+                return
+            }
+        } catch (e) {}
+        root.screenRecordingActive = false
+    }
 
     // Pipewire default audio source for live mute state & scroll toggling.
     // Assigned imperatively (not bound) so the reference survives default-source
@@ -47,7 +79,10 @@ RowLayout {
         function onDefaultAudioSourceChanged() { root.refreshSourceAudio() }
     }
 
-    Component.onCompleted: root.refreshSourceAudio()
+    Component.onCompleted: {
+        root.refreshSourceAudio()
+        root.checkRecordingState()
+    }
 
     PwObjectTracker {
         objects: Pipewire.defaultAudioSource ? [Pipewire.defaultAudioSource] : []
@@ -82,9 +117,25 @@ RowLayout {
     function updateDeviceStatuses() {
         const nodes = Pipewire.nodes.values || []
         let mic = false
-        let camera = false
+        let pwCamera = false
         let screen = false
 
+        // 1. Identify portal screencast provider nodes
+        let hasPortalSource = false
+        const portalIds = []
+        for (let i = 0; i < nodes.length; i++) {
+            const n = nodes[i]
+            if (!n) continue
+            const p = n.properties || {}
+            const mediaClass = p["media.class"] || ""
+            const nodeName = (n.name || p["node.name"] || "").toLowerCase()
+            if (mediaClass === "Video/Source" && /xdph|portal|hyprland|screencast/i.test(nodeName)) {
+                hasPortalSource = true
+                portalIds.push(n.id)
+            }
+        }
+
+        // 2. Identify mic and video streams
         for (let i = 0; i < nodes.length; i++) {
             const n = nodes[i]
             if (!n) continue
@@ -92,6 +143,8 @@ RowLayout {
             const mediaClass = p["media.class"] || ""
             const nodeName = (n.name || p["node.name"] || "").toLowerCase()
             const appName = (p["application.name"] || "").toLowerCase()
+            const mediaName = (p["media.name"] || "").toLowerCase()
+            const target = p["node.target"] || p["target.node"] || null
 
             // 1. Mic: Stream/Input/Audio excluding cava, quickshell, qs
             if (mediaClass === "Stream/Input/Audio" || (n.isStream && !n.isSink && n.audio !== null)) {
@@ -104,22 +157,33 @@ RowLayout {
 
             // 2. Video streams (Camera or Screen share)
             if (mediaClass.indexOf("Stream/") === 0 && mediaClass.indexOf("Video") !== -1) {
-                const isPortal = /xdph|portal|hyprland|screencast/i.test(nodeName) || /xdph|portal|hyprland|screencast/i.test(appName)
-                if (isPortal) {
+                // Ignore quickshell preview stream
+                if (nodeName.includes("quickshell") || appName.includes("quickshell")) {
+                    continue
+                }
+
+                const isPortalStream = /xdph|portal|hyprland|screencast/i.test(nodeName) ||
+                                       /xdph|portal|hyprland|screencast/i.test(appName) ||
+                                       mediaName.includes("screencast") ||
+                                       mediaName.includes("webrtc-consume-stream") ||
+                                       (target && portalIds.includes(parseInt(target)))
+
+                if (isPortalStream || hasPortalSource) {
                     screen = true
                 } else {
-                    camera = true
+                    pwCamera = true
                 }
             } else if (mediaClass === "Video/Source") {
                 const isPortal = /xdph|portal|hyprland|screencast/i.test(nodeName)
-                if (isPortal && (n.state === "running" || n.state === 3)) {
+                if (isPortal) {
                     screen = true
                 }
             }
         }
 
         root.micActive = mic
-        root.cameraActive = camera
+        root.pipewireCameraActive = pwCamera
+        root.cameraActive = pwCamera
         root.screenshareActive = screen
     }
 
@@ -143,164 +207,168 @@ RowLayout {
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // BADGE MODEL — computed array of active badges (no gaps in layout)
+    // INLINE BADGES — permanent items shown/hidden via `visible`
+    // Avoids Repeater re-creation and collapseTimer resets on state change.
     // ──────────────────────────────────────────────────────────────────────
-    property var badgeModel: {
-        const arr = []
-        if (root.micActive) {
-            arr.push({
-                type: "mic",
-                baseColor: "#ffff00",
-                iconText: "󰍬"
-            })
+
+    // ── Shared badge behaviour component ──────────────────────────────────
+    component DeviceBadge: Rectangle {
+        id: badge
+        Layout.alignment: Qt.AlignVCenter
+        required property string deviceType
+        required property color badgeBaseColor
+        property string badgeIconText: ""
+        property bool isMicBadge: deviceType === "mic"
+        property bool isRecBadge: deviceType === "record"
+        property bool muted: isMicBadge && root.srcAudio ? root.srcAudio.muted : false
+
+        property bool expanded: true
+
+        implicitWidth: expanded ? 24 : 8
+        implicitHeight: expanded ? 22 : 8
+        radius: expanded ? 6 : width / 2
+        color: isMicBadge ? (muted ? "#cc241d" : "#ffff00") : badgeBaseColor
+        scale: 1.0
+
+        Behavior on implicitWidth {
+            NumberAnimation {
+                duration: expanded ? 200 : 150
+                easing.type: expanded ? Easing.OutBack : Easing.InCubic
+                easing.overshoot: 1.08
+            }
         }
-        if (root.cameraActive) {
-            arr.push({
-                type: "camera",
-                baseColor: "#66ff00",
-                iconText: "󰄀"
-            })
+        Behavior on implicitHeight {
+            NumberAnimation {
+                duration: expanded ? 200 : 150
+                easing.type: expanded ? Easing.OutBack : Easing.InCubic
+                easing.overshoot: 1.08
+            }
         }
-        if (root.screenshareActive) {
-            arr.push({
-                type: "screenshare",
-                baseColor: "#9d00ff",
-                iconText: "󰍹"
-            })
+        Behavior on radius {
+            NumberAnimation { duration: expanded ? 180 : 150; easing.type: Easing.OutCubic }
         }
-        return arr
-    }
+        Behavior on color {
+            ColorAnimation { duration: 150; easing.type: Easing.InOutCubic }
+        }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // REUSABLE BADGE COMPONENT
-    // ──────────────────────────────────────────────────────────────────────
-    Component {
-        id: badgeComponent
-
-        Rectangle {
-            id: badge
-            property bool expanded: true
-            property bool isMic: false
-            property string deviceType: ""
-            property bool muted: isMic && root.srcAudio ? root.srcAudio.muted : false
-            property color baseColor: "#ffff00"
-            property string iconText: "󰍬"
-
-            implicitWidth: expanded ? 24 : 8
-            implicitHeight: expanded ? 22 : 8
-            radius: expanded ? 6 : width / 2
-            color: isMic ? (muted ? "#cc241d" : "#ffff00") : baseColor
-
-            scale: expanded ? 1.0 : 0.88
-
-            Behavior on scale {
-                NumberAnimation {
-                    duration: expanded ? 200 : 150
-                    easing.type: expanded ? Easing.OutBack : Easing.InCubic
-                    easing.overshoot: 1.1
-                }
+        Text {
+            anchors.centerIn: parent
+            font.family: "JetBrainsMono NFP"
+            font.pixelSize: 17
+            font.bold: true
+            color: badge.isMicBadge ? (badge.muted ? "#ffffff" : "#11111b") : "#11111b"
+            text: (badge.isMicBadge && badge.muted) ? "󰍭" : badge.badgeIconText
+            visible: !badge.isRecBadge && (badge.expanded || opacity > 0.0)
+            opacity: badge.expanded ? 1.0 : 0.0
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            Behavior on opacity {
+                NumberAnimation { duration: 140; easing.type: Easing.OutQuad }
             }
-            Behavior on implicitWidth {
-                NumberAnimation {
-                    duration: expanded ? 200 : 150
-                    easing.type: expanded ? Easing.OutBack : Easing.InCubic
-                    easing.overshoot: 1.08
-                }
-            }
-            Behavior on implicitHeight {
-                NumberAnimation {
-                    duration: expanded ? 200 : 150
-                    easing.type: expanded ? Easing.OutBack : Easing.InCubic
-                    easing.overshoot: 1.08
-                }
-            }
-            Behavior on radius {
-                NumberAnimation { duration: expanded ? 180 : 150; easing.type: Easing.OutCubic }
-            }
-            Behavior on color {
-                ColorAnimation { duration: 150; easing.type: Easing.InOutCubic }
+        }
+
+        // Authentic macOS Screen Recording Vector Icon (Outer ring + solid dot)
+        Item {
+            anchors.centerIn: parent
+            width: 14
+            height: 14
+            visible: badge.isRecBadge && (badge.expanded || opacity > 0.0)
+            opacity: badge.expanded ? 1.0 : 0.0
+            Behavior on opacity {
+                NumberAnimation { duration: 140; easing.type: Easing.OutQuad }
             }
 
-            Text {
-                id: badgeIcon
-                anchors.centerIn: parent
-                font.family: "JetBrainsMono NFP"
-                font.pixelSize: 17
-                font.bold: true
-                color: isMic ? (badge.muted ? "#ffffff" : "#11111b") : "#11111b"
-                // Only show glyph when expanded — collapsed dot is pure solid dot without text overflow
-                text: (isMic && badge.muted) ? "󰍭" : iconText
-                visible: badge.expanded
-                opacity: badge.expanded ? 1.0 : 0.0
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-                Behavior on opacity {
-                    NumberAnimation { duration: 140; easing.type: Easing.OutQuad }
-                }
-            }
-
-            Timer {
-                id: collapseTimer
-                interval: 5000
-                repeat: false
-                onTriggered: { expanded = false }
-            }
-
-            MouseArea {
+            Rectangle {
                 anchors.fill: parent
-                hoverEnabled: true
-                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                cursorShape: Qt.PointingHandCursor
-                onEntered: { expanded = true; collapseTimer.stop() }
-                onExited: { collapseTimer.restart() }
-                onClicked: function(mouse) {
-                    const cx = badge.mapToGlobal(badge.width / 2, 0).x
-                    if (deviceType === "mic") {
-                        if (mouse.button === Qt.LeftButton) {
-                            if (root.srcAudio) root.srcAudio.muted = !root.srcAudio.muted
-                        } else if (mouse.button === Qt.RightButton) {
-                            root.toggleDropdown(0, cx)
-                        }
-                    } else if (deviceType === "camera") {
-                        if (mouse.button === Qt.LeftButton) root.toggleDropdown(1, cx)
-                    } else if (deviceType === "screenshare") {
-                        if (mouse.button === Qt.LeftButton) root.toggleDropdown(2, cx)
+                radius: width / 2
+                color: "transparent"
+                border.color: "#ffffff"
+                border.width: 1.8
+            }
+
+            Rectangle {
+                width: 6
+                height: 6
+                radius: width / 2
+                anchors.centerIn: parent
+                color: "#ffffff"
+            }
+        }
+
+        Timer {
+            id: collapseTimer
+            interval: 5000
+            repeat: false
+            onTriggered: badge.expanded = false
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            cursorShape: Qt.PointingHandCursor
+            onEntered: { badge.expanded = true; collapseTimer.stop() }
+            onExited: { collapseTimer.restart() }
+            onClicked: function(mouse) {
+                const cx = badge.mapToGlobal(badge.width / 2, 0).x
+                if (badge.deviceType === "mic") {
+                    if (mouse.button === Qt.LeftButton) {
+                        if (root.srcAudio) root.srcAudio.muted = !root.srcAudio.muted
+                    } else if (mouse.button === Qt.RightButton) {
+                        root.toggleDropdown(0, cx)
+                    }
+                } else if (badge.deviceType === "camera") {
+                    if (mouse.button === Qt.LeftButton) root.toggleDropdown(1, cx)
+                } else if (badge.deviceType === "screenshare") {
+                    if (mouse.button === Qt.LeftButton) root.toggleDropdown(2, cx)
+                } else if (badge.deviceType === "record") {
+                    if (mouse.button === Qt.LeftButton) {
+                        Quickshell.execDetached(["quickshell", "ipc", "call", "screenrecord", "open"])
                     }
                 }
-                onWheel: function(wheel) {
-                    if (isMic && root.srcAudio) root.srcAudio.muted = !root.srcAudio.muted
-                }
             }
+            onWheel: function(wheel) {
+                if (badge.isMicBadge && root.srcAudio) root.srcAudio.muted = !root.srcAudio.muted
+            }
+        }
 
-            Component.onCompleted: {
+        onVisibleChanged: {
+            if (visible) {
+                expanded = true
                 collapseTimer.restart()
             }
         }
     }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // REPEATER — only creates badges for active devices (no gaps)
-    // ──────────────────────────────────────────────────────────────────────
-    Repeater {
-        model: root.badgeModel
+    // ── Mic Badge ─────────────────────────────────────────────────────────
+    DeviceBadge {
+        visible: root.micActive
+        deviceType: "mic"
+        badgeBaseColor: "#ffff00"
+        badgeIconText: "󰍬"
+        muted: root.srcAudio ? root.srcAudio.muted : false
+    }
 
-        delegate: Loader {
-            sourceComponent: badgeComponent
-            onStatusChanged: if (status === Loader.Ready) {
-                item.isMic = (modelData.type === "mic")
-                item.deviceType = modelData.type
-                item.baseColor = modelData.baseColor
-                item.iconText = modelData.iconText
-                if (modelData.type === "mic" && root.srcAudio) {
-                    item.muted = root.srcAudio.muted
-                }
-            }
-            // Bind mic mute state to Pipewire
-            Connections {
-                target: root.srcAudio
-                function onMutedChanged() { if (item && modelData.type === "mic") item.muted = root.srcAudio.muted }
-                function onVolumesChanged() { if (item && modelData.type === "mic") item.muted = root.srcAudio.muted }
-            }
-        }
+    // ── Camera Badge ──────────────────────────────────────────────────────
+    DeviceBadge {
+        visible: root.cameraActive
+        deviceType: "camera"
+        badgeBaseColor: "#66ff00"
+        badgeIconText: "󰄀"
+    }
+
+    // ── Screenshare Badge ─────────────────────────────────────────────────
+    DeviceBadge {
+        visible: root.screenshareActive
+        deviceType: "screenshare"
+        badgeBaseColor: "#9d00ff"
+        badgeIconText: "󰍹"
+    }
+
+    // ── Screen Recording Badge (4th Dot - Vibrant Red, macOS Icon) ────────
+    DeviceBadge {
+        visible: root.screenRecordingActive
+        deviceType: "record"
+        badgeBaseColor: "#ff3b30"
     }
 }

@@ -38,28 +38,48 @@ LiquidGlassCard {
         }
     }
 
+    function hasValidBattery(b) {
+        if (b === "" || b === null || b === undefined) return false
+        const p = parseInt(b)
+        return !isNaN(p) && p >= 0
+    }
+
     function updateFromDevices(devicesList) {
         if (!devicesList) {
             root.btConnectedDevices = []
             return
         }
-        const conn = devicesList.filter(d => d.isConnected)
+        // Only show connected devices that are exposing battery ("else leave it")
+        const conn = devicesList.filter(d => d.isConnected && hasValidBattery(d.battery))
         const mapped = conn.map(d => {
-            let iconPath = "file:///home/banana/.config/quickshell/media/icons/bluetooth_white.svg"
-            if (d.iconType === "mouse") iconPath = "file:///home/banana/.config/quickshell/media/icons/mouse_white.svg"
-            else if (d.iconType === "headphones") iconPath = "file:///home/banana/.config/quickshell/media/icons/headphones_white.svg"
-            else if (d.iconType === "keyboard") iconPath = "file:///home/banana/.config/quickshell/media/icons/keyboard_white.svg"
-            else if (d.iconType === "phone") iconPath = "file:///home/banana/.config/quickshell/media/icons/phone_white.svg"
+            let iconFile = "bluetooth_white.svg"
+            if (d.iconType === "mouse") iconFile = "mouse_white.svg"
+            else if (d.iconType === "earbuds" || d.iconType === "tws") iconFile = "earbuds_white.svg"
+            else if (d.iconType === "headphones") iconFile = "headphones_white.svg"
+            else if (d.iconType === "earphones") iconFile = "earphones_white.svg"
+            else if (d.iconType === "speaker") iconFile = "speaker_white.svg"
+            else if (d.iconType === "headset") iconFile = "headset_white.svg"
+            else if (d.iconType === "gamepad") iconFile = "gamepad_white.svg"
+            else if (d.iconType === "watch") iconFile = "watch_white.svg"
+            else if (d.iconType === "keyboard") iconFile = "keyboard_white.svg"
+            else if (d.iconType === "phone") iconFile = "phone_white.svg"
+            else if (d.iconType === "laptop") iconFile = "laptop_white.svg"
 
             return {
                 mac: d.mac,
                 name: d.name,
                 battery: parseInt(d.battery) || 0,
                 iconType: d.iconType,
-                iconPath: iconPath
+                iconPath: Paths.mediaIcon(iconFile)
             }
         })
         root.btConnectedDevices = mapped
+    }
+
+    Component.onCompleted: {
+        if (root.externalDevices) {
+            root.updateFromDevices(root.externalDevices)
+        }
     }
 
     // Bluetooth Devices list: [{ name, mac, battery, iconType, iconPath }]
@@ -69,7 +89,7 @@ LiquidGlassCard {
     // ── 2. Fallback Bluetooth Connected Devices Poller (when standalone) ──
     Process {
         id: btDevicesProc
-        command: ["/home/banana/.config/quickshell/scripts/bluetooth-service.py", "get"]
+        command: [Paths.script("bluetooth-service.py"), "get"]
         stdout: SplitParser {
             splitMarker: "\n"
             onRead: function(line) {
@@ -94,7 +114,7 @@ LiquidGlassCard {
         }
     }
 
-    // Helper functions to resolve slots
+    // Helper functions to resolve slots: Slot 0 = Laptop; Slots 1-3 = all connected BT devices exposing battery
     function getSlotDevice(index) {
         if (index === 0) {
             // Slot 1: Laptop
@@ -103,34 +123,15 @@ LiquidGlassCard {
                 battery: root.laptopBatteryPct,
                 isCharging: root.laptopCharging,
                 iconType: "laptop",
-                iconPath: "file:///home/banana/.config/quickshell/media/icons/laptop_white.svg",
+                iconPath: Paths.mediaIcon("laptop_white.svg"),
                 name: "Laptop"
             }
         }
 
-        // Search for specific device matches or fill sequentially
         const devices = root.btConnectedDevices || []
-
-        if (index === 1) {
-            // Prefer Mouse for Slot 2
-            const mouseDev = devices.find(d => d.iconType === "mouse")
-            if (mouseDev) return Object.assign({ connected: true, isCharging: false }, mouseDev)
-            // Or return first available if not mouse
-            if (devices.length > 0 && devices[0].iconType !== "headphones") {
-                return Object.assign({ connected: true, isCharging: false }, devices[0])
-            }
-        } else if (index === 2) {
-            // Prefer Headphones for Slot 3
-            const headDev = devices.find(d => d.iconType === "headphones")
-            if (headDev) return Object.assign({ connected: true, isCharging: false }, headDev)
-            // Or return second available
-            const others = devices.filter(d => d.iconType !== "mouse")
-            if (others.length > 0) return Object.assign({ connected: true, isCharging: false }, others[0])
-        } else if (index === 3) {
-            // Slot 4: 3rd device / Keyboard / Phone
-            const keyDev = devices.find(d => d.iconType === "keyboard" || d.iconType === "phone")
-            if (keyDev) return Object.assign({ connected: true, isCharging: false }, keyDev)
-            if (devices.length > 2) return Object.assign({ connected: true, isCharging: false }, devices[2])
+        const btIndex = index - 1
+        if (btIndex >= 0 && btIndex < devices.length) {
+            return Object.assign({ connected: true, isCharging: false }, devices[btIndex])
         }
 
         return { connected: false, battery: 0, isCharging: false, iconType: "", iconPath: "", name: "" }
@@ -152,7 +153,10 @@ LiquidGlassCard {
                 width: 78
                 height: 68
 
-                property var dev: root.getSlotDevice(index)
+                property var dev: {
+                    const _deps = [root.btConnectedDevices, root.laptopBatteryPct, root.laptopCharging]
+                    return root.getSlotDevice(index)
+                }
                 property bool connected: dev && dev.connected
                 property int batteryPct: dev ? dev.battery : 0
                 property bool isCharging: dev ? dev.isCharging : false
@@ -253,7 +257,7 @@ LiquidGlassCard {
                     visible: cell.connected
 
                     Text {
-                        text: cell.batteryPct > 0 ? cell.batteryPct : "--"
+                        text: (cell.connected && cell.batteryPct >= 0) ? cell.batteryPct : "--"
                         font.family: root.sfFont
                         font.pixelSize: 14
                         font.bold: true

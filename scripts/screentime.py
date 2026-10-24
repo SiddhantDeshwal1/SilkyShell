@@ -4,9 +4,12 @@ import os
 import sys
 import time
 import socket
+import select
+import fcntl
 import subprocess
 from pathlib import Path
 from datetime import datetime
+from qs_daemon_base import set_parent_death_signal
 
 CACHE_DIR = Path("/home/banana/.cache/quickshell")
 DATA_FILE = CACHE_DIR / "screentime.json"
@@ -189,6 +192,19 @@ def get_active_window_class():
     return ""
 
 def run_daemon():
+    set_parent_death_signal()
+    # Acquire singleton lock
+    try:
+        lock_file = open("/tmp/quickshell_screentime.lock", "a+")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(f"{os.getpid()}\n")
+        lock_file.flush()
+    except (BlockingIOError, IOError):
+        sys.stderr.write("[ScreenTime] Another daemon instance is already running. Exiting.\n")
+        sys.exit(0)
+
     raw_data = load_data()
     # Save once on start so JSON is populated
     save_data(raw_data)
@@ -198,6 +214,13 @@ def run_daemon():
 
     while True:
         try:
+            # Check if parent pipe closed
+            if not sys.stdin.isatty():
+                r, _, _ = select.select([sys.stdin], [], [], 0)
+                if r:
+                    chunk = sys.stdin.read(1)
+                    if chunk == "":
+                        break
             today = datetime.now().strftime("%Y-%m-%d")
             if raw_data.get("date") != today:
                 raw_data = {"date": today, "totalSeconds": 0, "apps": {}}

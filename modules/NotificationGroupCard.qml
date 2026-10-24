@@ -38,37 +38,16 @@ Item {
     signal dismissNotification(int notifId)
     signal dismissGroup(string groupKey)
 
-    // ── Dedicated Non-Blocking HoverHandler with Liquid Grace Period ──
-    HoverHandler {
-        id: groupHover
+    property bool isExpanded: false
+    onCountChanged: {
+        if (root.count <= 1) root.isExpanded = false
     }
-
-    Timer {
-        id: unhoverDelayTimer
-        interval: 90
-        repeat: false
-    }
-
-    Connections {
-        target: groupHover
-        function onHoveredChanged() {
-            if (!groupHover.hovered) {
-                unhoverDelayTimer.restart()
-            } else {
-                unhoverDelayTimer.stop()
-            }
-        }
-    }
-
-    property bool isHovered: groupHover.hovered || unhoverDelayTimer.running
-    property bool isPinnedOpen: false
-    property bool isExpanded: root.count > 1 && (isHovered || isPinnedOpen)
 
     // ── Buttery 60fps Liquid Motion Physics Curves ────────────────────
     // Expressive fluid spring with soft 8% liquid momentum overshoot on expand:
     readonly property var fluidExpandCurve: [0.25, 1.08, 0.22, 1.0, 1.0, 1.0]
-    // Silky smooth suction retraction with zero clipping or overshoot on collapse:
-    readonly property var fluidCollapseCurve: [0.22, 0.05, 0.24, 1.0, 1.0, 1.0]
+    // Responsive, silky smooth collapse curve without dragging delay:
+    readonly property var fluidCollapseCurve: [0.32, 0.0, 0.20, 1.0, 1.0, 1.0]
 
     // Dynamic Stacking geometry calculations
     readonly property real cardGap: 10
@@ -144,17 +123,10 @@ Item {
         implicitHeight: groupLayout.implicitHeight + (root.count > 1 ? 16 : 0)
         height: implicitHeight
 
-        Behavior on implicitHeight {
-            NumberAnimation {
-                duration: root.isExpanded ? 580 : 480
-                easing.type: Easing.BezierSpline
-                easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
-            }
-        }
-
         // Frosted Background Shell for Multi-card Stack
         LiquidGlassCard {
             id: outerGlassBg
+            enableWave: false
             anchors.fill: parent
             cardRadius: root.isExpanded ? 30 : 28
             idleColor: root.isExpanded
@@ -164,13 +136,13 @@ Item {
             visible: opacity > 0.01
 
             Behavior on cardRadius {
-                NumberAnimation { duration: root.isExpanded ? 500 : 420; easing.type: Easing.OutCubic }
+                NumberAnimation { duration: root.isExpanded ? 500 : 200; easing.type: Easing.OutCubic }
             }
             Behavior on idleColor {
-                ColorAnimation { duration: root.isExpanded ? 520 : 420 }
+                ColorAnimation { duration: root.isExpanded ? 520 : 200 }
             }
             Behavior on opacity {
-                NumberAnimation { duration: 320; easing.type: Easing.OutCubic }
+                NumberAnimation { duration: root.isExpanded ? 320 : 200; easing.type: Easing.OutCubic }
             }
         }
 
@@ -207,7 +179,7 @@ Item {
 
                 Behavior on implicitHeight {
                     NumberAnimation {
-                        duration: root.isExpanded ? 580 : 480
+                        duration: root.isExpanded ? 580 : 230
                         easing.type: Easing.BezierSpline
                         easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
                     }
@@ -240,7 +212,7 @@ Item {
                             NumberAnimation {
                                 duration: root.isExpanded
                                     ? Math.min(600, 520 + index * 30)
-                                    : Math.min(500, 460 + index * 20)
+                                    : 230
                                 easing.type: Easing.BezierSpline
                                 easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
                             }
@@ -351,7 +323,7 @@ Item {
                             NumberAnimation {
                                 duration: root.isExpanded
                                     ? Math.min(620, 520 + index * 35)
-                                    : Math.min(520, 460 + index * 20)
+                                    : Math.min(250, 210 + index * 15)
                                 easing.type: Easing.BezierSpline
                                 easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
                             }
@@ -361,7 +333,7 @@ Item {
                             NumberAnimation {
                                 duration: root.isExpanded
                                     ? Math.min(600, 520 + index * 30)
-                                    : Math.min(500, 460 + index * 20)
+                                    : 230
                                 easing.type: Easing.BezierSpline
                                 easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
                             }
@@ -369,7 +341,7 @@ Item {
                         Behavior on opacity {
                             enabled: !cardItem.isDismissing
                             NumberAnimation {
-                                duration: root.isExpanded ? 480 : 380
+                                duration: root.isExpanded ? 480 : 180
                                 easing.type: Easing.OutCubic
                             }
                         }
@@ -377,6 +349,7 @@ Item {
                         // Frosted Liquid Glass Card (Top tile dense/opaque; deeper tiles translucent)
                         LiquidGlassCard {
                             id: innerCardRect
+                            enableWave: false
                             anchors.fill: parent
                             clip: true
                             cardRadius: root.count === 1 ? 24 : (root.isExpanded ? 22 : 20)
@@ -387,80 +360,21 @@ Item {
 
                             Behavior on cardRadius {
                                 NumberAnimation {
-                                    duration: root.isExpanded ? 500 : 420
+                                    duration: root.isExpanded ? 500 : 220
                                     easing.type: Easing.OutCubic
                                 }
                             }
                             Behavior on idleColor {
                                 ColorAnimation {
-                                    duration: root.isExpanded ? 500 : 420
+                                    duration: root.isExpanded ? 500 : 220
                                 }
-                            }
-
-                            // Specular shimmer light sweep on tile ascending
-                            Rectangle {
-                                id: groupShimmer
-                                anchors.top: parent.top
-                                anchors.bottom: parent.bottom
-                                width: 70
-                                radius: innerCardRect.cardRadius
-                                x: -width - 20
-                                opacity: 0.0
-                                gradient: Gradient {
-                                    orientation: Gradient.Horizontal
-                                    GradientStop { position: 0.0; color: "transparent" }
-                                    GradientStop { position: 0.5; color: "#35ffffff" }
-                                    GradientStop { position: 1.0; color: "transparent" }
-                                }
-                                transform: Rotation { origin.x: 35; origin.y: 40; angle: 18 }
-                            }
-
-                            SequentialAnimation {
-                                id: groupShimmerAnim
-                                ParallelAnimation {
-                                    NumberAnimation {
-                                        target: groupShimmer
-                                        property: "x"
-                                        from: -80
-                                        to: innerCardRect.width + 80
-                                        duration: 400
-                                        easing.type: Easing.OutCubic
-                                    }
-                                    SequentialAnimation {
-                                        NumberAnimation { target: groupShimmer; property: "opacity"; from: 0.0; to: 0.8; duration: 120 }
-                                        NumberAnimation { target: groupShimmer; property: "opacity"; to: 0.0; duration: 280 }
-                                    }
-                                }
-                            }
-
-                            Connections {
-                                target: cardItem
-                                function onIsTopChanged() {
-                                    if (cardItem.isTop) groupShimmerAnim.restart()
-                                }
-                            }
-
-                            Connections {
-                                target: root
-                                function onIsExpandedChanged() {
-                                    if (root.isExpanded && !cardItem.isTop) {
-                                        expandShimmerTimer.interval = 100 + index * 70
-                                        expandShimmerTimer.restart()
-                                    }
-                                }
-                            }
-
-                            Timer {
-                                id: expandShimmerTimer
-                                repeat: false
-                                onTriggered: groupShimmerAnim.restart()
                             }
 
                             MouseArea {
                                 id: innerMouse
                                 anchors.fill: parent
                                 hoverEnabled: true
-                                cursorShape: (root.count > 1 && !root.isExpanded) ? Qt.PointingHandCursor : (pressed ? Qt.ClosedHandCursor : Qt.PointingHandCursor)
+                                cursorShape: root.count === 1 ? Qt.PointingHandCursor : (pressed ? Qt.ClosedHandCursor : Qt.ArrowCursor)
                                 preventStealing: true
 
                                 property real startX: 0
@@ -492,9 +406,7 @@ Item {
                                         }
                                         isDragging = false
                                     } else {
-                                        if (root.count > 1 && !root.isExpanded) {
-                                            root.isPinnedOpen = true
-                                        } else if (root.count === 1) {
+                                        if (root.count === 1) {
                                             cardItem.startDismiss()
                                         }
                                     }
@@ -514,7 +426,7 @@ Item {
                                 opacity: (cardItem.isTop || root.isExpanded) ? 1.0 : 0.0
                                 Behavior on opacity {
                                     NumberAnimation {
-                                        duration: root.isExpanded ? 440 : 260
+                                        duration: root.isExpanded ? 440 : 180
                                         easing.type: root.isExpanded ? Easing.OutCubic : Easing.InQuad
                                     }
                                 }
@@ -524,7 +436,7 @@ Item {
                                         y: (!cardItem.isTop && !root.isExpanded) ? -8 : 0
                                         Behavior on y {
                                             NumberAnimation {
-                                                duration: root.isExpanded ? 520 : 380
+                                                duration: root.isExpanded ? 520 : 240
                                                 easing.type: Easing.BezierSpline
                                                 easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
                                             }
@@ -600,13 +512,13 @@ Item {
 
                                             Behavior on opacity {
                                                 NumberAnimation {
-                                                    duration: root.isExpanded ? 320 : 420
+                                                    duration: root.isExpanded ? 320 : 200
                                                     easing.type: Easing.OutCubic
                                                 }
                                             }
                                             Behavior on scale {
                                                 NumberAnimation {
-                                                    duration: root.isExpanded ? 320 : 420
+                                                    duration: root.isExpanded ? 320 : 200
                                                     easing.type: Easing.BezierSpline
                                                     easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
                                                 }
@@ -656,7 +568,7 @@ Item {
 
                                             Behavior on opacity {
                                                 NumberAnimation {
-                                                    duration: root.isExpanded ? 440 : 260
+                                                    duration: root.isExpanded ? 440 : 180
                                                     easing.type: root.isExpanded ? Easing.OutCubic : Easing.InQuad
                                                 }
                                             }
@@ -764,7 +676,7 @@ Item {
                             rotation: root.isExpanded ? 180 : 0
                             Behavior on rotation {
                                 NumberAnimation {
-                                    duration: root.isExpanded ? 460 : 380
+                                    duration: root.isExpanded ? 460 : 220
                                     easing.type: Easing.BezierSpline
                                     easing.bezierCurve: root.isExpanded ? root.fluidExpandCurve : root.fluidCollapseCurve
                                 }
@@ -786,10 +698,8 @@ Item {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            if (root.isPinnedOpen) {
-                                root.isPinnedOpen = false
-                            } else {
-                                root.isPinnedOpen = !root.isExpanded
+                            if (root.count > 1) {
+                                root.isExpanded = !root.isExpanded
                             }
                         }
                     }

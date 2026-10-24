@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Wayland
+import Quickshell.Io
 
 // Full-width, always-visible black bar on the primary monitor.
 // Height 28px. exclusiveZone: 28 reserves space so windows don't overlap.
@@ -14,12 +15,42 @@ PanelWindow {
         right: true
     }
 
-    exclusiveZone: 28
+    property bool barVisible: true
+
+    visible: barVisible
+    exclusiveZone: barVisible ? 28 : 0
     WlrLayershell.layer: WlrLayer.Top
     WlrLayershell.namespace: "quickshell-bar"
 
     implicitHeight: 28
-    color: "#930a0a12"
+    color: Theme.barBgColor
+
+    Behavior on color {
+        ColorAnimation { duration: 350; easing.type: Easing.OutCubic }
+    }
+
+    IpcHandler {
+        target: "bar"
+        function toggle() {
+            if (barWindow.barVisible) {
+                barWindow.hideBar()
+            } else {
+                barWindow.showBar()
+            }
+        }
+        function show() { barWindow.showBar() }
+        function hide() { barWindow.hideBar() }
+    }
+
+    function hideBar() {
+        if (controlCenterPanel) controlCenterPanel.close()
+        if (notificationWidget) notificationWidget.closePanel()
+        barWindow.barVisible = false
+    }
+
+    function showBar() {
+        barWindow.barVisible = true
+    }
 
     // Bottom subtle glass hairline border
     Rectangle {
@@ -46,9 +77,9 @@ PanelWindow {
             implicitWidth: 840
         }
 
-        DynamicIslandBar {
-            id: dynamicIslandBar
-        }
+        // DynamicIslandBar {
+        //     id: dynamicIslandBar
+        // }
 
         // ── CENTER SPACER ─────────────────────────────────────────────
         Item { Layout.fillWidth: true }
@@ -72,23 +103,24 @@ PanelWindow {
             controlCenter: controlCenterPanel
             notificationCenter: notificationWidget
         }
-        NotificationWidget {
-            id: notificationWidget
-            dndActive: controlCenterPanel.dndActive
-            controlCenter: controlCenterPanel
-        }
+    }
+
+    NotificationWidget {
+        id: notificationWidget
+        dndActive: controlCenterPanel.dndActive
+        controlCenter: controlCenterPanel
     }
 
     ControlCenter {
         id: controlCenterPanel
         onDndActiveChanged: {
             if (notificationWidget) notificationWidget.dndActive = controlCenterPanel.dndActive
-            DynamicIslandService.focusMode = controlCenterPanel.dndActive
+            // DynamicIslandService.focusMode = controlCenterPanel.dndActive
         }
     }
 
     Component.onCompleted: {
-        DynamicIslandService.focusMode = controlCenterPanel.dndActive
+        // DynamicIslandService.focusMode = controlCenterPanel.dndActive
     }
 }
 

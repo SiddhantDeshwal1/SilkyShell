@@ -3,8 +3,9 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 
-// CPU, memory, GPU stats. Matches waybar cpu + memory + custom/gpu modules.
-// CPU via /proc/stat delta. Memory via /proc/meminfo. GPU via gpu.sh.
+// CPU, memory, GPU, power, temp stats. Matches waybar cpu + memory + custom/gpu modules.
+// CPU via /proc/stat delta. Memory via /proc/meminfo. GPU via drm card.
+// Power via RAPL energy_uj delta. Temp via hwmon k10temp/dell_smm.
 // Update interval: 2 seconds. Color: #fe8019 (gruvbox orange).
 Item {
     id: root
@@ -12,27 +13,24 @@ Item {
 
     property int cpuUsage: 0
     property real memUsedGb: 0
-    property string gpuText: "G: N/A "
+    property string gpuText: "G: N/A"
+    property string powerText: "P:--"
+    property string tempText: "T:--"
 
     // CPU delta tracking
     property var prevCpu: null   // { total, idle }
 
-    // ── Unified System Stats Poller (Single Process, 3s Interval) ───
-    Timer {
-        interval: 3000
-        running: true
-        repeat: true
-        triggeredOnStart: true
-        onTriggered: if (!statsProc.running) statsProc.running = true
-    }
-
+    // ── Persistent Stats Daemon (single long-running process, no respawn overhead) ───
+    // sys-stats.sh loops forever, emitting blocks every 3 s separated by '---END---'
     Process {
         id: statsProc
-        command: ["/home/banana/.config/quickshell/scripts/sys-stats.sh"]
+        command: [Paths.script("sys-stats.sh")]
+        running: true
         stdout: SplitParser {
             property int memTotal: 0
             onRead: function(line) {
                 const trimmed = line.trim()
+                if (trimmed === "---END---") return   // block separator, ignore
                 if (trimmed.startsWith("cpu ")) {
                     const parts = trimmed.split(/\s+/)
                     const user    = parseInt(parts[1])
@@ -64,10 +62,25 @@ Item {
                         }
                     }
                 } else if (trimmed.startsWith("G:")) {
-                    root.gpuText = trimmed + " "
+                    root.gpuText = trimmed.replace("%", "").trim()
+                } else if (trimmed.startsWith("P:")) {
+                    root.powerText = trimmed.replace("W", "").trim()
+                } else if (trimmed.startsWith("T:")) {
+                    root.tempText = trimmed.trim()
                 }
             }
         }
+        onExited: function(code, status) {
+            // Daemon exited unexpectedly — restart after 1 second
+            restartTimer.start()
+        }
+    }
+
+    Timer {
+        id: restartTimer
+        interval: 1000
+        repeat: false
+        onTriggered: if (!statsProc.running) statsProc.running = true
     }
 
     // ── Display ───────────────────────────────────────────────────────
@@ -79,6 +92,6 @@ Item {
         font.pixelSize: 17
         font.bold: false
         color: "#fe8019"
-        text: "C:" + root.cpuUsage + "%  M:" + (root.memUsedGb ? root.memUsedGb.toFixed(1) : "0.0") + "G  " + root.gpuText.trim()
+        text: "C:" + root.cpuUsage + "  M:" + (root.memUsedGb ? root.memUsedGb.toFixed(1) : "0.0") + "  " + root.gpuText + "  " + root.powerText + "  " + root.tempText
     }
 }

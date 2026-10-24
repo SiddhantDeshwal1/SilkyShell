@@ -14,6 +14,27 @@ Item {
 
     signal clicked()
 
+    function updateClock() {
+        const now = new Date()
+        const days   = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        clockText.text = days[now.getDay()] + " " +
+            now.getDate() + " " +
+            months[now.getMonth()] + "  " +
+            String(now.getHours()).padStart(2, "0") + ":" +
+            String(now.getMinutes()).padStart(2, "0")
+    }
+
+    Timer {
+        id: clockTimer
+        interval: 10000
+        repeat: true
+        running: true
+        onTriggered: root.updateClock()
+    }
+
+    Component.onCompleted: root.updateClock()
+
     Text {
         id: clockText
         anchors.centerIn: parent
@@ -26,23 +47,6 @@ Item {
 
         Behavior on color {
             ColorAnimation { duration: 150; easing.type: Easing.InOutCubic }
-        }
-
-        Timer {
-            interval: 1000
-            running: true
-            repeat: true
-            triggeredOnStart: true
-            onTriggered: {
-                const now = new Date()
-                const days   = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-                const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-                clockText.text = days[now.getDay()] + " " +
-                    now.getDate() + " " +
-                    months[now.getMonth()] + "  " +
-                    String(now.getHours()).padStart(2, "0") + ":" +
-                    String(now.getMinutes()).padStart(2, "0")
-            }
         }
     }
 

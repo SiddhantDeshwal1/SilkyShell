@@ -213,15 +213,15 @@ Item {
                 console.warn("[DynamicIsland] Failed to write to backend stdin:", e)
             }
         }
-        actionCmdProc.command = ["python3", "/home/banana/.config/quickshell/scripts/kdeconnect-service.py", "send", cmd]
+        actionCmdProc.command = ["python3", Paths.script("kdeconnect-service.py"), "send", cmd]
         actionCmdProc.running = true
     }
 
     // ── Backend Process (KDE Connect Daemon) ──────────────────────────
     property var _backendProc: Process {
         id: backendProc
-        command: ["python3", "/home/banana/.config/quickshell/scripts/kdeconnect-service.py"]
-        running: true
+        command: ["python3", Paths.script("kdeconnect-service.py")]
+        running: false
         stdinEnabled: true
 
         stdout: SplitParser {
@@ -240,7 +240,7 @@ Item {
         }
 
         onExited: function(code, status) {
-            backendRestartTimer.restart()
+            // backendRestartTimer.restart()
         }
     }
 
@@ -248,8 +248,9 @@ Item {
         id: backendRestartTimer
         interval: 1500
         repeat: false
+        running: false
         onTriggered: {
-            if (!backendProc.running) backendProc.running = true
+            // if (!backendProc.running) backendProc.running = true
         }
     }
 

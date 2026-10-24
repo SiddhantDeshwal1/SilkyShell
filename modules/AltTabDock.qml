@@ -79,14 +79,11 @@ PanelWindow {
         }
     }
 
-    // Refresh clients whenever active window changes
-    Connections {
-        target: Hyprland
-        function onActiveToplevelChanged() {
-            if (!root.open) {
-                clientsProc.running = false;
-                clientsProc.running = true;
-            }
+    // Refresh clients whenever dock opens
+    onOpenChanged: {
+        if (root.open) {
+            clientsProc.running = false;
+            clientsProc.running = true;
         }
     }
 
@@ -301,9 +298,12 @@ PanelWindow {
 
     function executeSwitch(addr) {
         if (!addr) return;
-        let lua = "local a = '" + addr + "'; for _, w in ipairs(hl.get_windows()) do if w.address == a then hl.dispatch(hl.dsp.focus({ window = w })); break end end";
+        try {
+            Hyprland.dispatch("focuswindow address:" + addr);
+            return;
+        } catch(e) {}
         execProc.running = false;
-        execProc.command = ["hyprctl", "eval", lua];
+        execProc.command = ["hyprctl", "dispatch", "focuswindow", "address:" + addr];
         execProc.running = true;
     }
 

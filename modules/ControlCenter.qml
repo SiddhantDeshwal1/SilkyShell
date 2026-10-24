@@ -59,6 +59,7 @@ PanelWindow {
         refreshStatus()
         refreshPowerMode()
         refreshDisplays()
+        refreshMultiMixer()
     }
 
     property string currentView: "main" // "main" | "wifi" | "bluetooth" | "sound" | "power" | "display"
@@ -72,7 +73,7 @@ PanelWindow {
     property string powerWattage: "15W"
     property string powerGovernor: "schedutil"
     property string powerScheduler: "scx_rusty"
-    property string powerTemp: "90°C"
+    property string powerTemp: "100°C"
 
     function parsePowerJson(jsonStr) {
         if (!jsonStr || !jsonStr.startsWith("{")) return
@@ -83,7 +84,7 @@ PanelWindow {
                 root.powerWattage = obj.wattage || "15W"
                 root.powerGovernor = obj.governor || "schedutil"
                 root.powerScheduler = obj.scheduler || "scx_rusty"
-                root.powerTemp = obj.temp || "90°C"
+                root.powerTemp = obj.temp || "100°C"
             }
         } catch(e) {}
     }
@@ -91,7 +92,7 @@ PanelWindow {
     // 1. One-shot live state reader (fast, reliable, authoritative)
     Process {
         id: powerGetProc
-        command: ["python3", "/home/banana/.config/quickshell/scripts/power-service.py", "get"]
+        command: ["python3", Paths.script("power-service.py"), "get"]
         stdout: SplitParser {
             splitMarker: "\n"
             onRead: function(line) { root.parsePowerJson(line.trim()) }
@@ -101,7 +102,7 @@ PanelWindow {
     // 2. Continuous Live Stream Daemon (listens to sleep/wake/lid events & updates live)
     Process {
         id: powerStreamProc
-        command: ["python3", "/home/banana/.config/quickshell/scripts/power-service.py", "daemon"]
+        command: ["python3", Paths.script("power-service.py"), "daemon"]
         running: true
         stdout: SplitParser {
             splitMarker: "\n"
@@ -132,10 +133,11 @@ PanelWindow {
         switch(m) {
             case "peak":         root.powerWattage = "35W"; root.powerTemp = "100°C"; break;
             case "performance":  root.powerWattage = "30W"; root.powerTemp = "100°C"; break;
-            case "balanced":     root.powerWattage = "15W"; root.powerTemp = "90°C";  break;
-            case "batterysaver": root.powerWattage = "10W"; root.powerTemp = "80°C";  break;
+            case "boost":        root.powerWattage = "25W"; root.powerTemp = "100°C"; break;
+            case "balanced":     root.powerWattage = "15W"; root.powerTemp = "100°C"; break;
+            case "batterysaver": root.powerWattage = "10W"; root.powerTemp = "100°C"; break;
         }
-        pwrSetProc.command = ["python3", "/home/banana/.config/quickshell/scripts/power-service.py", "set", m]
+        pwrSetProc.command = ["python3", Paths.script("power-service.py"), "set", m]
         pwrSetProc.running = true
     }
 
@@ -162,6 +164,14 @@ PanelWindow {
     property bool btDiscovering: false
     property string btConnectedDevice: ""
     property var btDevices: []
+    property int btConnectedCount: {
+        if (!btDevices || btDevices.length === 0) return 0
+        let c = 0
+        for (let i = 0; i < btDevices.length; i++) {
+            if (btDevices[i].isConnected) c++
+        }
+        return c
+    }
     property bool btScanning: false
     property var btTransientStates: ({})
     property string btCardName: ""
@@ -196,11 +206,189 @@ PanelWindow {
         } catch (e) {}
     }
 
+    // ── Screen Casting State ──────────────────────────────────────────
+    property bool castConnected: false
+    property string castConnectedDevice: ""
+    property var castDevices: []
+    property bool castScanning: false
+    property bool screenshareActive: {
+        if (root.castConnected) return true
+        const nodes = Pipewire.nodes.values || []
+        for (let i = 0; i < nodes.length; i++) {
+            const n = nodes[i]
+            if (!n) continue
+            const p = n.properties || {}
+            const mc = p["media.class"] || ""
+            const nn = (n.name || p["node.name"] || "").toLowerCase()
+            const an = (p["application.name"] || "").toLowerCase()
+            const mn = (p["media.name"] || "").toLowerCase()
+            if (mc.indexOf("Stream/") === 0 && mc.indexOf("Video") !== -1) {
+                if (nn.includes("quickshell") || an.includes("quickshell")) continue
+                if (/xdph|portal|hyprland|screencast/i.test(nn) || /xdph|portal|hyprland|screencast/i.test(an) || mn.includes("screencast") || mn.includes("webrtc-consume-stream")) return true
+            } else if (mc === "Video/Source" && /xdph|portal|hyprland|screencast/i.test(nn)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    // ── Screen Recording State (Zero-Process Inotify Observer) ─────────
+    property bool screenRecordingActive: false
+
+    FileView {
+        id: recStateFile
+        path: "/tmp/qs_recording.json"
+        watchChanges: true
+        onFileChanged: root.refreshRecordingStatus()
+        onLoadedChanged: root.refreshRecordingStatus()
+    }
+
+    function refreshRecordingStatus() {
+        try {
+            const txt = recStateFile.text()
+            if (txt && txt.trim().length > 0) {
+                const data = JSON.parse(txt.trim())
+                root.screenRecordingActive = !!data.isRecording
+                return
+            }
+        } catch (e) {}
+        root.screenRecordingActive = false
+    }
+
+    function stopScreenRecording() {
+        Quickshell.execDetached(["python3", Paths.script("screenrecord-service.py"), "stop"])
+        root.screenRecordingActive = false
+    }
+
     // ── Audio / Pipewire State ────────────────────────────────────────
     property var sink: Pipewire.defaultAudioSink
     property var sinkAudio: sink ? sink.audio : null
     property real volumeLevel: sinkAudio ? sinkAudio.volume : 0.5
     property bool isMuted: sinkAudio ? sinkAudio.muted : false
+
+    // ── Multi-Mixer State ─────────────────────────────────────────────
+    property bool multiMixerEnabled: false
+    property var multiMixerSlaves: []
+    property int multiMixerSyncDelay: 180
+    property bool multiMixerIsMixed: false
+    property string multiMixerVolumeDevice: ""
+    property var originalSinkVolumes: ({})
+    property var originalSinkMutes: ({})
+
+    function snapshotOriginalAudioSettings() {
+        if (root.originalSinkVolumes && Object.keys(root.originalSinkVolumes).length > 0) return
+        var vols = {}
+        var mutes = {}
+        var sinks = root.getAudioOutputSinks()
+        for (var i = 0; i < sinks.length; i++) {
+            var s = sinks[i]
+            if (s && s.name && s.audio) {
+                vols[s.name] = s.audio.volume
+                mutes[s.name] = s.audio.muted
+            }
+        }
+        root.originalSinkVolumes = vols
+        root.originalSinkMutes = mutes
+    }
+
+    function restoreOriginalAudioSettings() {
+        root.multiMixerVolumeDevice = ""
+        var sinks = root.getAudioOutputSinks()
+        for (var i = 0; i < sinks.length; i++) {
+            var s = sinks[i]
+            if (s && s.name) {
+                if (root.originalSinkVolumes && root.originalSinkVolumes[s.name] !== undefined) {
+                    var targetVol = root.originalSinkVolumes[s.name]
+                    if (s.audio) {
+                        s.audio.volume = targetVol
+                    }
+                    root.runShell("wpctl set-volume " + s.id + " " + targetVol.toFixed(3))
+                }
+                if (root.originalSinkMutes && root.originalSinkMutes[s.name] !== undefined) {
+                    var targetMute = root.originalSinkMutes[s.name]
+                    if (s.audio) {
+                        s.audio.muted = targetMute
+                    }
+                    root.runShell("wpctl set-mute " + s.id + " " + (targetMute ? "1" : "0"))
+                }
+            }
+        }
+        root.originalSinkVolumes = ({})
+        root.originalSinkMutes = ({})
+    }
+
+    function parseMultiMixerJson(jsonStr) {
+        if (!jsonStr || !jsonStr.startsWith("{")) return
+        try {
+            const data = JSON.parse(jsonStr)
+            root.multiMixerEnabled = !!data.enabled
+            root.multiMixerSlaves = data.slaves || []
+            if (data.sync_delay_ms !== undefined) root.multiMixerSyncDelay = data.sync_delay_ms
+            if (data.is_mixed !== undefined) root.multiMixerIsMixed = !!data.is_mixed
+        } catch(e) {}
+    }
+
+    function refreshMultiMixer() {
+        if (!multiMixerStateProc.running) multiMixerStateProc.running = true
+    }
+
+    function toggleMultiMixer() {
+        if (root.multiMixerEnabled) {
+            root.multiMixerEnabled = false
+            root.restoreOriginalAudioSettings()
+            const fallback = (root.multiMixerSlaves && root.multiMixerSlaves.length > 0) ? root.multiMixerSlaves[0] : ""
+            root.multiMixerSlaves = []
+            multiMixerActionProc.command = ["python3", Paths.script("audio-multimixer.py"), "disable", fallback]
+            multiMixerActionProc.running = true
+        } else {
+            root.multiMixerEnabled = true
+            root.snapshotOriginalAudioSettings()
+            const curSink = (Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.name && Pipewire.defaultAudioSink.name !== "qs_multi_mixer" && Pipewire.defaultAudioSink.name !== "qs_delayed_speaker")
+                ? Pipewire.defaultAudioSink.name
+                : ""
+            const slaves = curSink ? [curSink] : []
+            root.multiMixerSlaves = slaves
+            const args = ["python3", Paths.script("audio-multimixer.py"), "enable"]
+            if (curSink) args.push(curSink)
+            multiMixerActionProc.command = args
+            multiMixerActionProc.running = true
+        }
+    }
+
+    function toggleMultiMixerSink(sinkName) {
+        if (!sinkName) return
+        let slaves = root.multiMixerSlaves ? root.multiMixerSlaves.slice() : []
+        const idx = slaves.indexOf(sinkName)
+        if (idx !== -1) {
+            slaves.splice(idx, 1)
+        } else {
+            slaves.push(sinkName)
+        }
+        root.multiMixerSlaves = slaves
+        const cmd = ["python3", Paths.script("audio-multimixer.py"), "set-slaves"].concat(slaves)
+        multiMixerActionProc.command = cmd
+        multiMixerActionProc.running = true
+    }
+
+    function setMultiMixerDelay(ms) {
+        multiMixerActionProc.command = ["python3", Paths.script("audio-multimixer.py"), "set-delay", ms.toString()]
+        multiMixerActionProc.running = true
+    }
+
+    Timer {
+        id: multiMixerDelayDebounceTimer
+        interval: 120
+        repeat: false
+        onTriggered: {
+            root.setMultiMixerDelay(root.multiMixerSyncDelay)
+        }
+    }
+
+    function nudgeMultiMixerDelay(delta) {
+        const target = Math.max(0, Math.min(600, root.multiMixerSyncDelay + delta))
+        root.multiMixerSyncDelay = target
+        multiMixerDelayDebounceTimer.restart()
+    }
 
     PwObjectTracker {
         id: pwTracker
@@ -209,12 +397,18 @@ PanelWindow {
 
     function getAudioOutputSinks() {
         return Pipewire.nodes.values.filter(function(n) {
-            return n && n.isSink && !n.isStream
+            if (!n || !n.isSink || n.isStream) return false
+            const name = n.name || ""
+            if (name === "qs_multi_mixer" || name === "qs_delayed_speaker") return false
+            const propName = (n.properties && n.properties["node.name"]) || ""
+            if (propName === "qs_multi_mixer" || propName === "qs_delayed_speaker") return false
+            return true
         })
     }
 
     function getSinkIcon(s) {
         if (!s) return "󰕾"
+        if (root.multiMixerEnabled && (s === root.sink || s.name === "qs_multi_mixer")) return "󰓃"
         const name = (s.name || "").toLowerCase()
         const desc = (s.description || s.nickname || "").toLowerCase()
         if (name.includes("bluez") || name.includes("bluetooth") || desc.includes("bluetooth")) return "󰂯"
@@ -250,13 +444,17 @@ PanelWindow {
         function openWifi() { root.open = true; root.openWifiMenu() }
         function openBluetooth() { root.open = true; root.openBluetoothMenu() }
         function openSound() { root.open = true; root.openSoundMenu() }
+        function toggleMultiMixer() { root.toggleMultiMixer() }
+        function setMultiMixerVolumeDevice(dev: string) { root.multiMixerVolumeDevice = dev }
+        function toggleMultiMixerDevice(dev: string) { root.toggleMultiMixerSink(dev) }
         function openPower() { root.open = true; root.openPowerMenu() }
         function openScreenTime() { root.open = true; root.openPowerMenu() }
         function setPowerMode(m: string) { root.setPowerMode(m) }
         function openDisplay() { root.open = true; root.openDisplayMenu() }
+        function openCast() { root.open = true; root.openCastMenu() }
         function goBack() { root.goBack() }
-        property string activePowerMode: root.powerActiveMode
-        property string activePowerWattage: root.powerWattage
+        function getActivePowerMode() { return root.powerActiveMode }
+        function getActivePowerWattage() { return root.powerWattage }
         function refreshPowerMode() { root.refreshPowerMode() }
         function toggleDnd() { root.dndActive = !root.dndActive }
         function toggleDarkMode() { Theme.toggleDarkMode() }
@@ -271,6 +469,7 @@ PanelWindow {
         open = true
         currentView = "main"
         openRefreshTimer.restart()
+        refreshRecordingStatus()
     }
 
     function close() {
@@ -280,6 +479,7 @@ PanelWindow {
         wifiPasswordPromptOpen = false
         displayProfilesExpanded = false
         displayArrangeExpanded = false
+        root.multiMixerVolumeDevice = ""
     }
 
     function setupMenuOrigin(menuCard, sourceWidget, fallbackX, fallbackY, fallbackScaleX, fallbackScaleY, fallbackRadius) {
@@ -317,7 +517,7 @@ PanelWindow {
     }
 
     function openBluetoothMenu() {
-        root.setupMenuOrigin(btMenuCard, btCard, 97, -140, 0.484, 0.200, 175)
+        root.setupMenuOrigin(btMenuCard, btCard, -97, -53, 0.484, 0.200, 175)
         open = true
         currentView = "bluetooth"
         refreshBluetooth()
@@ -330,12 +530,13 @@ PanelWindow {
         root.setupMenuOrigin(soundMenuCard, soundCard, 0, 155, 1.0, 0.224, 107)
         open = true
         currentView = "sound"
+        root.refreshMultiMixer()
         root.runShell("quickshell ipc call notifications close &")
     }
 
     function openPowerMenu() {
         if (currentView === "bluetooth") stopBluetoothScan()
-        root.setupMenuOrigin(powerMenuCard, pwrCard, 97, -73, 0.511, 0.184, 190)
+        root.setupMenuOrigin(powerMenuCard, pwrCard, 97, 180, 0.511, 0.184, 190)
         open = true
         currentView = "power"
         refreshPowerMode()
@@ -357,12 +558,22 @@ PanelWindow {
         root.runShell("quickshell ipc call notifications close &")
     }
 
+    function openCastMenu() {
+        if (currentView === "bluetooth") stopBluetoothScan()
+        root.setupMenuOrigin(castMenuCard, castCard, -40, 180, 0.197, 0.218, 37)
+        open = true
+        currentView = "cast"
+        scanCastDevices()
+        root.runShell("quickshell ipc call notifications close &")
+    }
+
     function goBack() {
         if (currentView === "bluetooth") stopBluetoothScan()
         currentView = "main"
         wifiPasswordPromptOpen = false
         displayProfilesExpanded = false
         displayArrangeExpanded = false
+        root.multiMixerVolumeDevice = ""
     }
 
     function formatAppIcon(iconName) {
@@ -400,7 +611,7 @@ PanelWindow {
     // Continuous Live Stream Daemon (runs 24/7, listens to NM + login1 sleep/wake/lid events)
     Process {
         id: wifiStreamProc
-        command: ["python3", "/home/banana/.config/quickshell/scripts/network-service.py", "daemon"]
+        command: ["python3", Paths.script("network-service.py"), "daemon"]
         running: true
         stdout: SplitParser {
             splitMarker: "\n"
@@ -423,7 +634,7 @@ PanelWindow {
     // Fast one-shot state reader
     Process {
         id: wifiStateProc
-        command: ["python3", "/home/banana/.config/quickshell/scripts/network-service.py", "get"]
+        command: ["python3", Paths.script("network-service.py"), "get"]
         stdout: SplitParser {
             splitMarker: "\n"
             onRead: function(line) { root.parseWifiJson(line.trim()) }
@@ -436,14 +647,14 @@ PanelWindow {
 
     function toggleWifi() {
         if (wifiEnabled) {
-            runShell("/home/banana/.config/quickshell/scripts/network-service.py radio-off &")
+            runShell(Paths.script("network-service.py") + " radio-off &")
             wifiEnabled = false
             wifiConnected = false
             wifiSsid = ""
             wifiNetworks = []
             wifiPasswordPromptOpen = false
         } else {
-            runShell("/home/banana/.config/quickshell/scripts/network-service.py radio-on &")
+            runShell(Paths.script("network-service.py") + " radio-on &")
             wifiEnabled = true
             refreshWifi()
             if (currentView === "wifi") scanWifi(false)
@@ -487,7 +698,7 @@ PanelWindow {
         if (!wifiEnabled) return
         root.wifiScanning = true
         wifiMinSpinTimer.restart()
-        wifiScanProc.command = ["python3", "/home/banana/.config/quickshell/scripts/network-service.py", forceRescan ? "rescan" : "scan"]
+        wifiScanProc.command = ["python3", Paths.script("network-service.py"), forceRescan ? "rescan" : "scan"]
         wifiScanProc.running = true
     }
 
@@ -549,7 +760,7 @@ PanelWindow {
     }
 
     function disconnectWifi() {
-        runShell("/home/banana/.config/quickshell/scripts/network-service.py disconnect &")
+        runShell(Paths.script("network-service.py") + " disconnect &")
         root.wifiConnected = false
         root.wifiSsid = ""
         scanWifi(false)
@@ -603,7 +814,7 @@ PanelWindow {
     // One-shot state reader
     Process {
         id: btStateProc
-        command: ["python3", "/home/banana/.config/quickshell/scripts/bluetooth-service.py", "get"]
+        command: ["python3", Paths.script("bluetooth-service.py"), "get"]
         stdout: SplitParser {
             splitMarker: "\n"
             onRead: function(line) { root.parseBtJson(line.trim()) }
@@ -613,7 +824,7 @@ PanelWindow {
     // Continuous Live Stream Daemon (runs 24/7, listens to BlueZ + login1 sleep/wake/lid events)
     Process {
         id: btStreamProc
-        command: ["python3", "/home/banana/.config/quickshell/scripts/bluetooth-service.py", "daemon"]
+        command: ["python3", Paths.script("bluetooth-service.py"), "daemon"]
         running: true
         stdout: SplitParser {
             splitMarker: "\n"
@@ -658,10 +869,10 @@ PanelWindow {
             root.btDevices = []
             root.btAudioProfiles = []
             stopBluetoothScan()
-            runShell("/home/banana/.config/quickshell/scripts/bluetooth-service.py power-off &")
+            runShell(Paths.script("bluetooth-service.py") + " power-off &")
         } else {
             root.btPowered = true
-            runShell("/home/banana/.config/quickshell/scripts/bluetooth-service.py power-on &")
+            runShell(Paths.script("bluetooth-service.py") + " power-on &")
             refreshBluetooth()
             if (currentView === "bluetooth") {
                 scanBluetooth()
@@ -682,13 +893,13 @@ PanelWindow {
         if (!btPowered) return
         root.btScanning = true
         btMinSpinTimer.restart()
-        runShell("/home/banana/.config/quickshell/scripts/bluetooth-service.py scan-on &")
+        runShell(Paths.script("bluetooth-service.py") + " scan-on &")
         refreshBluetooth()
     }
 
     function stopBluetoothScan() {
         root.btScanning = false
-        runShell("/home/banana/.config/quickshell/scripts/bluetooth-service.py scan-off &")
+        runShell(Paths.script("bluetooth-service.py") + " scan-off &")
     }
 
     function connectBluetooth(mac) {
@@ -697,7 +908,7 @@ PanelWindow {
         root.btTransientStates = t
         root.btDevices = root.btDevices.map(d => d.mac === mac ? Object.assign({}, d, { state: "connecting" }) : d)
         btActionTimeoutTimer.restart()
-        runShell("/home/banana/.config/quickshell/scripts/bluetooth-service.py connect " + mac + " &")
+        runShell(Paths.script("bluetooth-service.py") + " connect " + mac + " &")
         btQuickPollTimer.restart()
     }
 
@@ -707,7 +918,7 @@ PanelWindow {
         root.btTransientStates = t
         root.btDevices = root.btDevices.map(d => d.mac === mac ? Object.assign({}, d, { state: "disconnecting" }) : d)
         btActionTimeoutTimer.restart()
-        runShell("/home/banana/.config/quickshell/scripts/bluetooth-service.py disconnect " + mac + " &")
+        runShell(Paths.script("bluetooth-service.py") + " disconnect " + mac + " &")
         btQuickPollTimer.restart()
     }
 
@@ -717,20 +928,20 @@ PanelWindow {
         root.btTransientStates = t
         root.btDevices = root.btDevices.map(d => d.mac === mac ? Object.assign({}, d, { state: "pairing" }) : d)
         btActionTimeoutTimer.restart()
-        runShell("/home/banana/.config/quickshell/scripts/bluetooth-service.py pair " + mac + " &")
+        runShell(Paths.script("bluetooth-service.py") + " pair " + mac + " &")
         btQuickPollTimer.restart()
     }
 
     function removeBluetooth(mac) {
         root.btDevices = root.btDevices.filter(d => d.mac !== mac)
-        runShell("/home/banana/.config/quickshell/scripts/bluetooth-service.py remove " + mac + " &")
+        runShell(Paths.script("bluetooth-service.py") + " remove " + mac + " &")
         btQuickPollTimer.restart()
     }
 
     function setBtProfile(profile) {
         if (root.btCardName === "") return
         root.btActiveProfile = profile
-        runShell("/home/banana/.config/quickshell/scripts/bluetooth-service.py set-profile " + root.btCardName + " " + profile + " &")
+        runShell(Paths.script("bluetooth-service.py") + " set-profile " + root.btCardName + " " + profile + " &")
     }
 
     // Dedicated Screen Lock Runner
@@ -808,7 +1019,7 @@ PanelWindow {
         root.brightnessLevel = clamped
         const val = Math.round(clamped * 100)
         brightSetProc.running = false
-        brightSetProc.command = ["python3", "/home/banana/.config/quickshell/scripts/brightness-control.py", "set", val.toString()]
+        brightSetProc.command = ["python3", Paths.script("brightness-control.py"), "set", val.toString()]
         brightSetProc.running = true
     }
 
@@ -817,12 +1028,13 @@ PanelWindow {
         refreshBluetooth()
         brightProc.running = true
         root.refreshDisplays()
+        refreshRecordingStatus()
     }
 
     // 4. Display Manager Backend (display-manager.py)
     Process {
         id: displayStateProc
-        command: ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "get"]
+        command: ["python3", Paths.script("display-manager.py"), "get"]
         stdout: SplitParser {
             splitMarker: "\n"
             onRead: function(line) {
@@ -858,39 +1070,139 @@ PanelWindow {
     }
 
     function setDisplayResolution(monName, res) {
-        displayActionProc.command = ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "set-resolution", monName, res]
+        displayActionProc.command = ["python3", Paths.script("display-manager.py"), "set-resolution", monName, res]
         displayActionProc.running = true
     }
 
     function setDisplaySharing(monName, mode, target) {
-        const cmd = ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "set-sharing", monName, mode]
+        const cmd = ["python3", Paths.script("display-manager.py"), "set-sharing", monName, mode]
         if (target) cmd.push(target)
         displayActionProc.command = cmd
         displayActionProc.running = true
     }
 
     function setDisplayDpms(monName, state) {
-        displayActionProc.command = ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "set-dpms", monName, state]
+        displayActionProc.command = ["python3", Paths.script("display-manager.py"), "set-dpms", monName, state]
         displayActionProc.running = true
     }
 
     function setDisplayProfile(monName, profile) {
         if (!monName) return
         root.displayActiveProfile = profile
-        displayActionProc.command = ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "set-profile", monName, profile]
+        displayActionProc.command = ["python3", Paths.script("display-manager.py"), "set-profile", monName, profile]
         displayActionProc.running = true
     }
 
     function setDisplayArrangement(monName, arrangement) {
         if (!monName) return
-        displayActionProc.command = ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "set-arrangement", monName, arrangement]
+        displayActionProc.command = ["python3", Paths.script("display-manager.py"), "set-arrangement", monName, arrangement]
         displayActionProc.running = true
     }
 
     function setDisplayOrientation(monName, transform) {
         if (!monName) return
-        displayActionProc.command = ["python3", "/home/banana/.config/quickshell/scripts/display-manager.py", "set-orientation", monName, transform.toString()]
+        displayActionProc.command = ["python3", Paths.script("display-manager.py"), "set-orientation", monName, transform.toString()]
         displayActionProc.running = true
+    }
+
+    // 5. Multi-Mixer Backend (audio-multimixer.py)
+    Process {
+        id: multiMixerStateProc
+        command: ["python3", Paths.script("audio-multimixer.py"), "status"]
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) {
+                root.parseMultiMixerJson(line.trim())
+            }
+        }
+    }
+
+    Process {
+        id: multiMixerActionProc
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) {
+                root.parseMultiMixerJson(line.trim())
+            }
+        }
+        onExited: {
+            multiMixerRefreshTimer.restart()
+        }
+    }
+
+    Timer {
+        id: multiMixerRefreshTimer
+        interval: 200
+        repeat: false
+        onTriggered: root.refreshMultiMixer()
+    }
+
+    Timer {
+        id: multiMixerPollTimer
+        interval: 3000
+        running: root.open && root.currentView === "sound"
+        repeat: true
+        onTriggered: root.refreshMultiMixer()
+    }
+
+    // 6. Screen Casting Backend (screencast-service.py)
+    Process {
+        id: castScanProc
+        command: ["python3", Paths.script("screencast-service.py"), "scan"]
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) {
+                try {
+                    const data = JSON.parse(line.trim())
+                    if (data.devices !== undefined) {
+                        root.castDevices = data.devices
+                    }
+                    if (data.status) {
+                        root.castConnected = !!data.status.connected
+                        root.castConnectedDevice = (data.status.device && data.status.device.name) ? data.status.device.name : ""
+                    }
+                } catch (e) {}
+                root.castScanning = false
+            }
+        }
+        onExited: {
+            root.castScanning = false
+        }
+    }
+
+    Process {
+        id: castActionProc
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) {
+                try {
+                    const data = JSON.parse(line.trim())
+                    root.castConnected = !!data.connected
+                    root.castConnectedDevice = (data.device && data.device.name) ? data.device.name : ""
+                } catch (e) {}
+                root.scanCastDevices()
+            }
+        }
+    }
+
+    function scanCastDevices() {
+        root.castScanning = true
+        castScanProc.running = false
+        castScanProc.running = true
+    }
+
+    function connectCast(dev) {
+        if (!dev) return
+        castActionProc.command = [
+            "python3", Paths.script("screencast-service.py"), "connect",
+            dev.id, dev.name, dev.protocol, dev.ip, (dev.port || "8009").toString()
+        ]
+        castActionProc.running = true
+    }
+
+    function disconnectCast() {
+        castActionProc.command = ["python3", Paths.script("screencast-service.py"), "disconnect"]
+        castActionProc.running = true
     }
 
     // Safety sync timers
@@ -945,6 +1257,7 @@ PanelWindow {
             if (root.currentView === "sound") return soundMenuCard.height
             if (root.currentView === "screentime" || root.currentView === "power") return powerMenuCard.height
             if (root.currentView === "display") return displayMenuCard.height
+            if (root.currentView === "cast") return castMenuCard.height
             return mainLayout.implicitHeight
         }
         height: implicitHeight
@@ -1035,15 +1348,19 @@ PanelWindow {
                 }
             ]
 
-            // 1. TOP 2x2 MODULAR GRID (70px Height, Compact Padding)
-            GridLayout {
 
+            // ══════════════════════════════════════════════════════════
+            // 1. TOP ROW: WI-FI & BLUETOOTH (LEFT) + MUSIC WIDGET (RIGHT)
+            // ══════════════════════════════════════════════════════════
+            RowLayout {
                 Layout.fillWidth: true
-                columns: 2
-                columnSpacing: 12
-                rowSpacing: 12
+                spacing: 12
 
-                // 1.1 Wi-Fi Pill
+                // 1.1 Left Column: Wi-Fi on top, Bluetooth below it
+                ColumnLayout {
+                    Layout.preferredWidth: 182
+                    spacing: 12
+
                 LiquidGlassCard {
                     id: wifiCard
                     Layout.fillWidth: true
@@ -1205,7 +1522,7 @@ PanelWindow {
                     }
                 }
 
-                // 1.2 Bluetooth Pill
+
                 LiquidGlassCard {
                     id: btCard
                     Layout.fillWidth: true
@@ -1334,16 +1651,91 @@ PanelWindow {
                                 renderType: Text.QtRendering
                             }
 
-                            Text {
-                                text: root.btPowered
-                                    ? (root.btConnectedDevice !== "" ? root.btConnectedDevice : "On")
-                                    : "Off"
-                                font.family: root.sfFont
-                                font.pixelSize: 13
-                                color: "#93c5fd"
+                            Item {
+                                id: btSubtextContainer
                                 Layout.fillWidth: true
-                                elide: Text.ElideRight
-                                renderType: Text.QtRendering
+                                implicitHeight: 18
+                                clip: true
+
+                                readonly property string subText: {
+                                    if (!root.btPowered) return "Off"
+                                    if (root.btConnectedCount > 1) return root.btConnectedCount + " Devices Connected"
+                                    if (root.btConnectedCount === 1) {
+                                        if (root.btConnectedDevice !== "") return root.btConnectedDevice
+                                        const cDev = (root.btDevices || []).find(d => d.isConnected)
+                                        return cDev ? cDev.name : "Connected"
+                                    }
+                                    return "On"
+                                }
+                                readonly property bool isFlowing: root.btPowered && btSubtextContainer.width > 0 && btSubTextMetric.implicitWidth > btSubtextContainer.width
+                                readonly property real overflowDistance: Math.max(0, btSubTextMetric.implicitWidth - btSubtextContainer.width + 12)
+
+                                Text {
+                                    id: btSubTextMetric
+                                    visible: false
+                                    font.family: root.sfFont
+                                    font.pixelSize: 13
+                                    text: btSubtextContainer.subText
+                                }
+
+                                Text {
+                                    id: btSubText
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    x: 0
+                                    font.family: root.sfFont
+                                    font.pixelSize: 13
+                                    color: "#93c5fd"
+                                    text: btSubtextContainer.subText
+                                    renderType: Text.QtRendering
+                                }
+
+                                SequentialAnimation {
+                                    id: btFlowAnim
+                                    running: root.open && btSubtextContainer.isFlowing
+                                    loops: Animation.Infinite
+
+                                    PauseAnimation { duration: 1500 }
+                                    NumberAnimation {
+                                        target: btSubText
+                                        property: "x"
+                                        from: 0
+                                        to: -btSubtextContainer.overflowDistance
+                                        duration: Math.max(2000, btSubtextContainer.overflowDistance * 35)
+                                        easing.type: Easing.Linear
+                                    }
+                                    PauseAnimation { duration: 1500 }
+                                    NumberAnimation {
+                                        target: btSubText
+                                        property: "x"
+                                        from: -btSubtextContainer.overflowDistance
+                                        to: 0
+                                        duration: Math.max(1200, btSubtextContainer.overflowDistance * 20)
+                                        easing.type: Easing.OutCubic
+                                    }
+                                }
+
+                                onIsFlowingChanged: {
+                                    if (!isFlowing) {
+                                        btSubText.x = 0
+                                        btFlowAnim.stop()
+                                    } else {
+                                        btFlowAnim.restart()
+                                    }
+                                }
+
+                                onSubTextChanged: {
+                                    btSubText.x = 0
+                                    btFlowAnim.restart()
+                                }
+                                Connections {
+                                    target: root
+                                    function onOpenChanged() {
+                                        if (root.open) {
+                                            btSubText.x = 0
+                                            btFlowAnim.restart()
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -1367,7 +1759,169 @@ PanelWindow {
                     }
                 }
 
-                // 1.3 Dark Mode / Night Light
+
+                }
+
+                // 1.2 Right Column: 2x2 Music Playback Widget (182x152)
+                MediaPlaybackWidget {
+                    id: mediaCard
+                    Layout.preferredWidth: 182
+                    Layout.preferredHeight: 152
+
+                    transform: [
+                        Scale {
+                            id: mediaScale
+                            origin.x: mediaCard.width / 2
+                            origin.y: mediaCard.height / 2
+                            xScale: 0.75
+                            yScale: 0.75
+                        },
+                        Translate {
+                            id: mediaTrans
+                            y: -20
+                        }
+                    ]
+                    opacity: 0.0
+
+                    state: root.open ? "open" : "closed"
+                    states: [
+                        State {
+                            name: "open"
+                            PropertyChanges { target: mediaScale; xScale: 1.0; yScale: 1.0 }
+                            PropertyChanges { target: mediaTrans; y: 0 }
+                            PropertyChanges { target: mediaCard; opacity: 1.0 }
+                        },
+                        State {
+                            name: "closed"
+                            PropertyChanges { target: mediaScale; xScale: 0.75; yScale: 0.75 }
+                            PropertyChanges { target: mediaTrans; y: -20 }
+                            PropertyChanges { target: mediaCard; opacity: 0.0 }
+                        }
+                    ]
+                    transitions: [
+                        Transition {
+                            from: "closed"; to: "open"
+                            SequentialAnimation {
+                                PropertyAction { target: mediaTrans; property: "y"; value: -20 }
+                                PropertyAction { target: mediaScale; property: "xScale"; value: 0.75 }
+                                PropertyAction { target: mediaScale; property: "yScale"; value: 0.75 }
+                                PropertyAction { target: mediaCard; property: "opacity"; value: 1.0 }
+                                PauseAnimation { duration: 140 }
+                                ParallelAnimation {
+                                    NumberAnimation { target: mediaTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: mediaScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: mediaScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                }
+                            }
+                        },
+                        Transition {
+                            from: "open"; to: "closed"
+                            SequentialAnimation {
+                                ParallelAnimation {
+                                    NumberAnimation { target: mediaTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: mediaScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: mediaScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    SequentialAnimation {
+                                        PauseAnimation { duration: 250 }
+                                        NumberAnimation { target: mediaCard; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
+                                    }
+                                }
+                                PropertyAction { target: mediaTrans; property: "y"; value: -20 }
+                                PropertyAction { target: mediaScale; property: "xScale"; value: 0.75 }
+                                PropertyAction { target: mediaScale; property: "yScale"; value: 0.75 }
+                            }
+                        }
+                    ]
+                }
+            }
+
+            // ══════════════════════════════════════════════════════════
+            // 2. CHARGING WIDGET (LEFT) + FOCUS & DARK MODE (RIGHT)
+            // ══════════════════════════════════════════════════════════
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                // 2.1 Left: Connected Devices / Charging Widget (182x156)
+                ConnectedDevicesWidget {
+                    id: devicesWidget
+                    externalDevices: root.btDevices
+                    Layout.preferredWidth: 182
+                    Layout.preferredHeight: 156
+
+                    transform: [
+                        Scale {
+                            id: devScale
+                            origin.x: devicesWidget.width / 2
+                            origin.y: devicesWidget.height / 2
+                            xScale: 0.75
+                            yScale: 0.75
+                        },
+                        Translate {
+                            id: devTrans
+                            y: -20
+                        }
+                    ]
+                    opacity: 0.0
+
+                    state: root.open ? "open" : "closed"
+                    states: [
+                        State {
+                            name: "open"
+                            PropertyChanges { target: devScale; xScale: 1.0; yScale: 1.0 }
+                            PropertyChanges { target: devTrans; y: 0 }
+                            PropertyChanges { target: devicesWidget; opacity: 1.0 }
+                        },
+                        State {
+                            name: "closed"
+                            PropertyChanges { target: devScale; xScale: 0.75; yScale: 0.75 }
+                            PropertyChanges { target: devTrans; y: -20 }
+                            PropertyChanges { target: devicesWidget; opacity: 0.0 }
+                        }
+                    ]
+                    transitions: [
+                        Transition {
+                            from: "closed"; to: "open"
+                            SequentialAnimation {
+                                PropertyAction { target: devTrans; property: "y"; value: -20 }
+                                PropertyAction { target: devScale; property: "xScale"; value: 0.75 }
+                                PropertyAction { target: devScale; property: "yScale"; value: 0.75 }
+                                PropertyAction { target: devicesWidget; property: "opacity"; value: 1.0 }
+                                PauseAnimation { duration: 70 }
+                                ParallelAnimation {
+                                    NumberAnimation { target: devTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: devScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: devScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                }
+                            }
+                        },
+                        Transition {
+                            from: "open"; to: "closed"
+                            SequentialAnimation {
+                                PauseAnimation { duration: 38 }
+                                ParallelAnimation {
+                                    NumberAnimation { target: devTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: devScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: devScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    SequentialAnimation {
+                                        PauseAnimation { duration: 250 }
+                                        NumberAnimation { target: devicesWidget; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
+                                    }
+                                }
+                                PropertyAction { target: devTrans; property: "y"; value: -20 }
+                                PropertyAction { target: devScale; property: "xScale"; value: 0.75 }
+                                PropertyAction { target: devScale; property: "yScale"; value: 0.75 }
+                            }
+                        }
+                    ]
+                }
+
+
+                // 2.2 Right Column: Dark Mode & Focus
+                ColumnLayout {
+                    Layout.preferredWidth: 182
+                    spacing: 12
+
                 LiquidGlassCard {
                     id: darkPill
                     Layout.fillWidth: true
@@ -1783,374 +2337,7 @@ PanelWindow {
                         }
                     }
                 }
-            }
 
-            // ══════════════════════════════════════════════════════════
-            // 2. CONNECTED DEVICES & SCREEN TIME MODULAR SECTION (156px Height)
-            // ══════════════════════════════════════════════════════════
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 12
-
-                // 2.1 Left: 2x2 Connected Devices Battery Widget (182x156)
-                ConnectedDevicesWidget {
-                    id: devicesWidget
-                    externalDevices: root.btDevices
-                    Layout.preferredWidth: 182
-                    Layout.preferredHeight: 156
-
-                    transform: [
-                        Scale {
-                            id: devScale
-                            origin.x: devicesWidget.width / 2
-                            origin.y: devicesWidget.height / 2
-                            xScale: 0.75
-                            yScale: 0.75
-                        },
-                        Translate {
-                            id: devTrans
-                            y: -20
-                        }
-                    ]
-                    opacity: 0.0
-
-                    state: root.open ? "open" : "closed"
-                    states: [
-                        State {
-                            name: "open"
-                            PropertyChanges { target: devScale; xScale: 1.0; yScale: 1.0 }
-                            PropertyChanges { target: devTrans; y: 0 }
-                            PropertyChanges { target: devicesWidget; opacity: 1.0 }
-                        },
-                        State {
-                            name: "closed"
-                            PropertyChanges { target: devScale; xScale: 0.75; yScale: 0.75 }
-                            PropertyChanges { target: devTrans; y: -20 }
-                            PropertyChanges { target: devicesWidget; opacity: 0.0 }
-                        }
-                    ]
-                    transitions: [
-                        Transition {
-                            from: "closed"; to: "open"
-                            SequentialAnimation {
-                                PropertyAction { target: devTrans; property: "y"; value: -20 }
-                                PropertyAction { target: devScale; property: "xScale"; value: 0.75 }
-                                PropertyAction { target: devScale; property: "yScale"; value: 0.75 }
-                                PropertyAction { target: devicesWidget; property: "opacity"; value: 1.0 }
-                                PauseAnimation { duration: 70 }
-                                ParallelAnimation {
-                                    NumberAnimation { target: devTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    NumberAnimation { target: devScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    NumberAnimation { target: devScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                }
-                            }
-                        },
-                        Transition {
-                            from: "open"; to: "closed"
-                            SequentialAnimation {
-                                PauseAnimation { duration: 38 }
-                                ParallelAnimation {
-                                    NumberAnimation { target: devTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    NumberAnimation { target: devScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    NumberAnimation { target: devScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    SequentialAnimation {
-                                        PauseAnimation { duration: 250 }
-                                        NumberAnimation { target: devicesWidget; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
-                                    }
-                                }
-                                PropertyAction { target: devTrans; property: "y"; value: -20 }
-                                PropertyAction { target: devScale; property: "xScale"; value: 0.75 }
-                                PropertyAction { target: devScale; property: "yScale"; value: 0.75 }
-                            }
-                        }
-                    ]
-                }
-
-                // 2.2 Right Column: Screen Time Widget (Top) + Lock & Camera (Bottom)
-                ColumnLayout {
-                    Layout.preferredWidth: 182
-                    Layout.preferredHeight: 156
-                    spacing: 12
-
-                    // 2.2.1 Power Mode Capsule Widget (182x70)
-                    PowerModeWidget {
-                        id: pwrCard
-                        Layout.preferredWidth: 182
-                        Layout.preferredHeight: 70
-                        activeMode: root.powerActiveMode
-                        onClicked: root.openPowerMenu()
-                        onModeChanged: (m) => root.setPowerMode(m)
-
-                        transform: [
-                            Scale {
-                                id: pwrScale
-                                origin.x: pwrCard.width / 2
-                                origin.y: pwrCard.height / 2
-                                xScale: 0.75
-                                yScale: 0.75
-                            },
-                            Translate {
-                                id: pwrTrans
-                                y: -20
-                            }
-                        ]
-                        opacity: 0.0
-
-                        state: root.open ? "open" : "closed"
-                        states: [
-                            State {
-                                name: "open"
-                                PropertyChanges { target: pwrScale; xScale: 1.0; yScale: 1.0 }
-                                PropertyChanges { target: pwrTrans; y: 0 }
-                                PropertyChanges { target: pwrCard; opacity: 1.0 }
-                            },
-                            State {
-                                name: "closed"
-                                PropertyChanges { target: pwrScale; xScale: 0.75; yScale: 0.75 }
-                                PropertyChanges { target: pwrTrans; y: -20 }
-                                PropertyChanges { target: pwrCard; opacity: 0.0 }
-                            }
-                        ]
-                        transitions: [
-                            Transition {
-                                from: "closed"; to: "open"
-                                SequentialAnimation {
-                                    PropertyAction { target: pwrTrans; property: "y"; value: -20 }
-                                    PropertyAction { target: pwrScale; property: "xScale"; value: 0.75 }
-                                    PropertyAction { target: pwrScale; property: "yScale"; value: 0.75 }
-                                    PropertyAction { target: pwrCard; property: "opacity"; value: 1.0 }
-                                    PauseAnimation { duration: 70 }
-                                    ParallelAnimation {
-                                        NumberAnimation { target: pwrTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        NumberAnimation { target: pwrScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        NumberAnimation { target: pwrScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    }
-                                }
-                            },
-                            Transition {
-                                from: "open"; to: "closed"
-                                SequentialAnimation {
-                                    PauseAnimation { duration: 38 }
-                                    ParallelAnimation {
-                                        NumberAnimation { target: pwrTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        NumberAnimation { target: pwrScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        NumberAnimation { target: pwrScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                        SequentialAnimation {
-                                            PauseAnimation { duration: 250 }
-                                            NumberAnimation { target: pwrCard; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
-                                        }
-                                    }
-                                    PropertyAction { target: pwrTrans; property: "y"; value: -20 }
-                                    PropertyAction { target: pwrScale; property: "xScale"; value: 0.75 }
-                                    PropertyAction { target: pwrScale; property: "yScale"; value: 0.75 }
-                                }
-                            }
-                        ]
-                    }
-
-                    // 2.2.2 Lower Row: Reverted to Older 1x1 Circle Action Icons (74x74)
-                    RowLayout {
-                        Layout.preferredWidth: 182
-                        Layout.alignment: Qt.AlignHCenter
-                        spacing: 18
-
-                        // 1x1 Lock Screen Circular Button (74x74, radius 37)
-                        LiquidGlassCard {
-                            id: lockCard
-                            Layout.preferredWidth: 74
-                            Layout.preferredHeight: 74
-                            cardRadius: 37
-                            isHovered: lockBtnMouse.containsMouse
-                            isPressed: lockBtnMouse.pressed
-
-                            
-
-                            transform: [
-                        Scale {
-                            id: lockScale
-                            origin.x: lockCard.width / 2
-                            origin.y: lockCard.height / 2
-                            xScale: 0.75
-                            yScale: 0.75
-                        },
-                        Translate {
-                            id: lockTrans
-                            y: -20
-                        }
-                    ]
-                    opacity: 0.0
-
-                    state: root.open ? "open" : "closed"
-                    states: [
-                        State {
-                            name: "open"
-                            PropertyChanges { target: lockScale; xScale: 1.0; yScale: 1.0 }
-                            PropertyChanges { target: lockTrans; y: 0 }
-                            PropertyChanges { target: lockCard; opacity: 1.0 }
-                        },
-                        State {
-                            name: "closed"
-                            PropertyChanges { target: lockScale; xScale: 0.75; yScale: 0.75 }
-                            PropertyChanges { target: lockTrans; y: -20 }
-                            PropertyChanges { target: lockCard; opacity: 0.0 }
-                        }
-                    ]
-                    transitions: [
-                        Transition {
-                            from: "closed"; to: "open"
-                            SequentialAnimation {
-                                PropertyAction { target: lockTrans; property: "y"; value: -20 }
-                                PropertyAction { target: lockScale; property: "xScale"; value: 0.75 }
-                                PropertyAction { target: lockScale; property: "yScale"; value: 0.75 }
-                                PropertyAction { target: lockCard; property: "opacity"; value: 1.0 }
-                                PauseAnimation { duration: 70 }
-                                ParallelAnimation {
-                                    NumberAnimation { target: lockTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    NumberAnimation { target: lockScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    NumberAnimation { target: lockScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                }
-                            }
-                        },
-                        Transition {
-                            from: "open"; to: "closed"
-                            SequentialAnimation {
-                                PauseAnimation { duration: 38 }
-                                ParallelAnimation {
-                                    NumberAnimation { target: lockTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    NumberAnimation { target: lockScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    NumberAnimation { target: lockScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    SequentialAnimation {
-                                        PauseAnimation { duration: 250 }
-                                        NumberAnimation { target: lockCard; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
-                                    }
-                                }
-                                PropertyAction { target: lockTrans; property: "y"; value: -20 }
-                                PropertyAction { target: lockScale; property: "xScale"; value: 0.75 }
-                                PropertyAction { target: lockScale; property: "yScale"; value: 0.75 }
-                            }
-                        }
-                    ]
-
-                    Text {
-                                anchors.centerIn: parent
-                                font.family: root.iconFont
-                                font.pixelSize: 30
-                                color: "#ffffff"
-                                text: "󰌾"
-                                renderType: Text.QtRendering
-                            }
-
-                            MouseArea {
-                                id: lockBtnMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    root.close()
-                                    lockProc.running = false
-                                    lockProc.running = true
-                                }
-                            }
-                        }
-
-                        // 1x1 Camera / Screenshot Circular Button (74x74, radius 37)
-                        LiquidGlassCard {
-                            id: shotCard
-                            Layout.preferredWidth: 74
-                            Layout.preferredHeight: 74
-                            cardRadius: 37
-                            isHovered: shotBtnMouse.containsMouse
-                            isPressed: shotBtnMouse.pressed
-
-                            
-
-                            transform: [
-                        Scale {
-                            id: shotScale
-                            origin.x: shotCard.width / 2
-                            origin.y: shotCard.height / 2
-                            xScale: 0.75
-                            yScale: 0.75
-                        },
-                        Translate {
-                            id: shotTrans
-                            y: -20
-                        }
-                    ]
-                    opacity: 0.0
-
-                    state: root.open ? "open" : "closed"
-                    states: [
-                        State {
-                            name: "open"
-                            PropertyChanges { target: shotScale; xScale: 1.0; yScale: 1.0 }
-                            PropertyChanges { target: shotTrans; y: 0 }
-                            PropertyChanges { target: shotCard; opacity: 1.0 }
-                        },
-                        State {
-                            name: "closed"
-                            PropertyChanges { target: shotScale; xScale: 0.75; yScale: 0.75 }
-                            PropertyChanges { target: shotTrans; y: -20 }
-                            PropertyChanges { target: shotCard; opacity: 0.0 }
-                        }
-                    ]
-                    transitions: [
-                        Transition {
-                            from: "closed"; to: "open"
-                            SequentialAnimation {
-                                PropertyAction { target: shotTrans; property: "y"; value: -20 }
-                                PropertyAction { target: shotScale; property: "xScale"; value: 0.75 }
-                                PropertyAction { target: shotScale; property: "yScale"; value: 0.75 }
-                                PropertyAction { target: shotCard; property: "opacity"; value: 1.0 }
-                                PauseAnimation { duration: 70 }
-                                ParallelAnimation {
-                                    NumberAnimation { target: shotTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    NumberAnimation { target: shotScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    NumberAnimation { target: shotScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                }
-                            }
-                        },
-                        Transition {
-                            from: "open"; to: "closed"
-                            SequentialAnimation {
-                                PauseAnimation { duration: 38 }
-                                ParallelAnimation {
-                                    NumberAnimation { target: shotTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    NumberAnimation { target: shotScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    NumberAnimation { target: shotScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
-                                    SequentialAnimation {
-                                        PauseAnimation { duration: 250 }
-                                        NumberAnimation { target: shotCard; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
-                                    }
-                                }
-                                PropertyAction { target: shotTrans; property: "y"; value: -20 }
-                                PropertyAction { target: shotScale; property: "xScale"; value: 0.75 }
-                                PropertyAction { target: shotScale; property: "yScale"; value: 0.75 }
-                            }
-                        }
-                    ]
-
-                    Text {
-                                anchors.centerIn: parent
-                                font.family: root.iconFont
-                                font.pixelSize: 30
-                                color: "#a78bfa"
-                                text: "󰆐"
-                                renderType: Text.QtRendering
-                            }
-
-                            MouseArea {
-                                id: shotBtnMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    root.close()
-                                    root.runShell("~/.config/quickshell/scripts/screenshot.sh --area &")
-                                }
-                            }
-                        }
-                    }
                 }
             }
 
@@ -2320,30 +2507,30 @@ PanelWindow {
                                     width: bTrack.width * root.brightnessLevel
                                     Behavior on width {
                                         enabled: !bSliderMouse.pressed
-                                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                                        NumberAnimation { duration: 80; easing.type: Easing.OutQuad }
                                     }
                                 }
 
                                 Rectangle {
                                     id: bKnob
-                                    width: 16
+                                    width: bSliderMouse.pressed ? 26 : (bSliderMouse.containsMouse ? 24 : 22)
                                     height: 16
                                     radius: 8
                                     color: "#ffffff"
-                                    border.color: "#e2e8f0"
-                                    border.width: 1.5
+                                    border.color: bSliderMouse.pressed ? "#ffffff" : "#cbd5e1"
+                                    border.width: 1.2
                                     anchors.verticalCenter: parent.verticalCenter
-                                    x: Math.max(0, Math.min(bTrack.width - 16, bTrack.width * root.brightnessLevel - 8))
+                                    x: Math.max(0, Math.min(bTrack.width - width, bTrack.width * root.brightnessLevel - width / 2))
 
-                                    opacity: bSliderMouse.containsMouse || bSliderMouse.pressed ? 1.0 : 0.0
-                                    scale: bSliderMouse.containsMouse || bSliderMouse.pressed ? 1.0 : 0.5
+                                    opacity: 1.0
+                                    scale: bSliderMouse.pressed ? 1.08 : (bSliderMouse.containsMouse ? 1.04 : 1.0)
 
+                                    Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                                    Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutBack } }
                                     Behavior on x {
                                         enabled: !bSliderMouse.pressed
-                                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                                        NumberAnimation { duration: 80; easing.type: Easing.OutQuad }
                                     }
-                                    Behavior on opacity { NumberAnimation { duration: 150 } }
-                                    Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutBack } }
                                 }
                             }
 
@@ -2524,10 +2711,10 @@ PanelWindow {
                         Layout.fillWidth: true
 
                         Text {
-                            text: root.isMuted ? "Sound (Muted)" : "Sound"
+                            text: root.multiMixerEnabled ? "Sound (Multi-Mixer)" : (root.isMuted ? "Sound (Muted)" : "Sound")
                             font.family: root.sfFont
                             font.pixelSize: 16
-                            color: root.isMuted ? "#f43f5e" : "#ffffff"
+                            color: root.isMuted ? "#f43f5e" : (root.multiMixerEnabled ? "#60a5fa" : "#ffffff")
                             renderType: Text.QtRendering
                             Layout.fillWidth: true
                         }
@@ -2591,24 +2778,32 @@ PanelWindow {
                                     radius: parent.radius
                                     color: "#ffffff"
                                     width: vTrack.width * Math.min(1.0, root.volumeLevel)
+                                    Behavior on width {
+                                        enabled: !vSliderMouse.pressed
+                                        NumberAnimation { duration: 80; easing.type: Easing.OutQuad }
+                                    }
                                 }
 
                                 Rectangle {
                                     id: vKnob
-                                    width: 16
+                                    width: vSliderMouse.pressed ? 26 : (vSliderMouse.containsMouse ? 24 : 22)
                                     height: 16
                                     radius: 8
                                     color: "#ffffff"
-                                    border.color: root.isMuted ? "#94a3b8" : "#e2e8f0"
-                                    border.width: 1.5
+                                    border.color: root.isMuted ? "#94a3b8" : (vSliderMouse.pressed ? "#ffffff" : "#cbd5e1")
+                                    border.width: 1.2
                                     anchors.verticalCenter: parent.verticalCenter
-                                    x: Math.max(0, Math.min(vTrack.width - 16, vTrack.width * Math.min(1.0, root.volumeLevel) - 8))
+                                    x: Math.max(0, Math.min(vTrack.width - width, vTrack.width * Math.min(1.0, root.volumeLevel) - width / 2))
 
-                                    opacity: vSliderMouse.containsMouse || vSliderMouse.pressed ? 1.0 : 0.0
-                                    scale: vSliderMouse.containsMouse || vSliderMouse.pressed ? 1.0 : 0.5
+                                    opacity: 1.0
+                                    scale: vSliderMouse.pressed ? 1.08 : (vSliderMouse.containsMouse ? 1.04 : 1.0)
 
-                                    Behavior on opacity { NumberAnimation { duration: 150 } }
+                                    Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                                     Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutBack } }
+                                    Behavior on x {
+                                        enabled: !vSliderMouse.pressed
+                                        NumberAnimation { duration: 80; easing.type: Easing.OutQuad }
+                                    }
                                 }
                             }
 
@@ -2689,6 +2884,536 @@ PanelWindow {
                         }
                     }
                 }
+            }
+
+
+
+            // ══════════════════════════════════════════════════════════
+            // ══════════════════════════════════════════════════════════
+            // 4. 2x2 ACTION CIRCLE MATRIX (LEFT) & POWER WIDGET (RIGHT)
+            // ══════════════════════════════════════════════════════════
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                // 4.1 Left: 2x2 Circle Action Matrix (Lock, Snip, Record, Cast)
+                ColumnLayout {
+                    Layout.preferredWidth: 182
+                    spacing: 12
+
+                    // Row 4.1.1: Lock & Snip
+                    RowLayout {
+                        Layout.preferredWidth: 182
+                        Layout.alignment: Qt.AlignHCenter
+                        spacing: 18
+
+                        LiquidGlassCard {
+                            id: lockCard
+                            Layout.preferredWidth: 74
+                            Layout.preferredHeight: 74
+                            cardRadius: 37
+                            isHovered: lockBtnMouse.containsMouse
+                            isPressed: lockBtnMouse.pressed
+
+                            transform: [
+                        Scale {
+                            id: lockScale
+                            origin.x: lockCard.width / 2
+                            origin.y: lockCard.height / 2
+                            xScale: 0.75
+                            yScale: 0.75
+                        },
+                        Translate {
+                            id: lockTrans
+                            y: -20
+                        }
+                    ]
+                    opacity: 0.0
+
+                    state: root.open ? "open" : "closed"
+                    states: [
+                        State {
+                            name: "open"
+                            PropertyChanges { target: lockScale; xScale: 1.0; yScale: 1.0 }
+                            PropertyChanges { target: lockTrans; y: 0 }
+                            PropertyChanges { target: lockCard; opacity: 1.0 }
+                        },
+                        State {
+                            name: "closed"
+                            PropertyChanges { target: lockScale; xScale: 0.75; yScale: 0.75 }
+                            PropertyChanges { target: lockTrans; y: -20 }
+                            PropertyChanges { target: lockCard; opacity: 0.0 }
+                        }
+                    ]
+                    transitions: [
+                        Transition {
+                            from: "closed"; to: "open"
+                            SequentialAnimation {
+                                PropertyAction { target: lockTrans; property: "y"; value: -20 }
+                                PropertyAction { target: lockScale; property: "xScale"; value: 0.75 }
+                                PropertyAction { target: lockScale; property: "yScale"; value: 0.75 }
+                                PropertyAction { target: lockCard; property: "opacity"; value: 1.0 }
+                                PauseAnimation { duration: 70 }
+                                ParallelAnimation {
+                                    NumberAnimation { target: lockTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: lockScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: lockScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                }
+                            }
+                        },
+                        Transition {
+                            from: "open"; to: "closed"
+                            SequentialAnimation {
+                                PauseAnimation { duration: 38 }
+                                ParallelAnimation {
+                                    NumberAnimation { target: lockTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: lockScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: lockScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    SequentialAnimation {
+                                        PauseAnimation { duration: 250 }
+                                        NumberAnimation { target: lockCard; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
+                                    }
+                                }
+                                PropertyAction { target: lockTrans; property: "y"; value: -20 }
+                                PropertyAction { target: lockScale; property: "xScale"; value: 0.75 }
+                                PropertyAction { target: lockScale; property: "yScale"; value: 0.75 }
+                            }
+                        }
+                    ]
+
+                    Text {
+                                anchors.centerIn: parent
+                                font.family: root.iconFont
+                                font.pixelSize: 30
+                                color: "#ffffff"
+                                text: "󰌾"
+                                renderType: Text.QtRendering
+                            }
+
+                            MouseArea {
+                                id: lockBtnMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.close()
+                                    lockProc.running = false
+                                    lockProc.running = true
+                                }
+                            }
+                        }
+
+                        LiquidGlassCard {
+                            id: shotCard
+                            Layout.preferredWidth: 74
+                            Layout.preferredHeight: 74
+                            cardRadius: 37
+                            isHovered: shotBtnMouse.containsMouse
+                            isPressed: shotBtnMouse.pressed
+
+                            transform: [
+                        Scale {
+                            id: shotScale
+                            origin.x: shotCard.width / 2
+                            origin.y: shotCard.height / 2
+                            xScale: 0.75
+                            yScale: 0.75
+                        },
+                        Translate {
+                            id: shotTrans
+                            y: -20
+                        }
+                    ]
+                    opacity: 0.0
+
+                    state: root.open ? "open" : "closed"
+                    states: [
+                        State {
+                            name: "open"
+                            PropertyChanges { target: shotScale; xScale: 1.0; yScale: 1.0 }
+                            PropertyChanges { target: shotTrans; y: 0 }
+                            PropertyChanges { target: shotCard; opacity: 1.0 }
+                        },
+                        State {
+                            name: "closed"
+                            PropertyChanges { target: shotScale; xScale: 0.75; yScale: 0.75 }
+                            PropertyChanges { target: shotTrans; y: -20 }
+                            PropertyChanges { target: shotCard; opacity: 0.0 }
+                        }
+                    ]
+                    transitions: [
+                        Transition {
+                            from: "closed"; to: "open"
+                            SequentialAnimation {
+                                PropertyAction { target: shotTrans; property: "y"; value: -20 }
+                                PropertyAction { target: shotScale; property: "xScale"; value: 0.75 }
+                                PropertyAction { target: shotScale; property: "yScale"; value: 0.75 }
+                                PropertyAction { target: shotCard; property: "opacity"; value: 1.0 }
+                                PauseAnimation { duration: 70 }
+                                ParallelAnimation {
+                                    NumberAnimation { target: shotTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: shotScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: shotScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                }
+                            }
+                        },
+                        Transition {
+                            from: "open"; to: "closed"
+                            SequentialAnimation {
+                                PauseAnimation { duration: 38 }
+                                ParallelAnimation {
+                                    NumberAnimation { target: shotTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: shotScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    NumberAnimation { target: shotScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    SequentialAnimation {
+                                        PauseAnimation { duration: 250 }
+                                        NumberAnimation { target: shotCard; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
+                                    }
+                                }
+                                PropertyAction { target: shotTrans; property: "y"; value: -20 }
+                                PropertyAction { target: shotScale; property: "xScale"; value: 0.75 }
+                                PropertyAction { target: shotScale; property: "yScale"; value: 0.75 }
+                            }
+                        }
+                    ]
+
+                    Text {
+                                anchors.centerIn: parent
+                                font.family: root.iconFont
+                                font.pixelSize: 30
+                                color: "#ffffff"
+                                text: "󰆐"
+                                renderType: Text.QtRendering
+                            }
+
+                            MouseArea {
+                                id: shotBtnMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.close()
+                                    root.runShell("~/.config/quickshell/scripts/screenshot.sh --area &")
+                                }
+                            }
+                        }
+
+                    }
+
+                    // Row 4.1.2: Record & Screen Cast (Cast directly below Snip)
+                    RowLayout {
+                        Layout.preferredWidth: 182
+                        Layout.alignment: Qt.AlignHCenter
+                        spacing: 18
+
+                        LiquidGlassCard {
+                            id: recCard
+                            Layout.preferredWidth: 74
+                            Layout.preferredHeight: 74
+                            cardRadius: 37
+                            isHovered: recBtnMouse.containsMouse
+                            isPressed: recBtnMouse.pressed
+                            isActive: root.screenRecordingActive
+                            activeColor: "#ffffff"
+                            activeBorderColor: Qt.rgba(0.94, 0.27, 0.27, 0.6)
+                            activeRimColor: Qt.rgba(0.94, 0.27, 0.27, 0.3)
+                            idleColor: Theme.cardIdleColor
+
+                            transform: [
+                                Scale {
+                                    id: recScale
+                                    origin.x: recCard.width / 2
+                                    origin.y: recCard.height / 2
+                                    xScale: 0.75
+                                    yScale: 0.75
+                                },
+                                Translate {
+                                    id: recTrans
+                                    y: -20
+                                }
+                            ]
+                            opacity: 0.0
+
+                            state: root.open ? "open" : "closed"
+                            states: [
+                                State {
+                                    name: "open"
+                                    PropertyChanges { target: recScale; xScale: 1.0; yScale: 1.0 }
+                                    PropertyChanges { target: recTrans; y: 0 }
+                                    PropertyChanges { target: recCard; opacity: 1.0 }
+                                },
+                                State {
+                                    name: "closed"
+                                    PropertyChanges { target: recScale; xScale: 0.75; yScale: 0.75 }
+                                    PropertyChanges { target: recTrans; y: -20 }
+                                    PropertyChanges { target: recCard; opacity: 0.0 }
+                                }
+                            ]
+                            transitions: [
+                                Transition {
+                                    from: "closed"; to: "open"
+                                    SequentialAnimation {
+                                        PropertyAction { target: recTrans; property: "y"; value: -20 }
+                                        PropertyAction { target: recScale; property: "xScale"; value: 0.75 }
+                                        PropertyAction { target: recScale; property: "yScale"; value: 0.75 }
+                                        PropertyAction { target: recCard; property: "opacity"; value: 1.0 }
+                                        PauseAnimation { duration: 70 }
+                                        ParallelAnimation {
+                                            NumberAnimation { target: recTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                            NumberAnimation { target: recScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                            NumberAnimation { target: recScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        }
+                                    }
+                                },
+                                Transition {
+                                    from: "open"; to: "closed"
+                                    SequentialAnimation {
+                                        PauseAnimation { duration: 38 }
+                                        ParallelAnimation {
+                                            NumberAnimation { target: recTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                            NumberAnimation { target: recScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                            NumberAnimation { target: recScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                            SequentialAnimation {
+                                                PauseAnimation { duration: 250 }
+                                                NumberAnimation { target: recCard; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
+                                            }
+                                        }
+                                        PropertyAction { target: recTrans; property: "y"; value: -20 }
+                                        PropertyAction { target: recScale; property: "xScale"; value: 0.75 }
+                                        PropertyAction { target: recScale; property: "yScale"; value: 0.75 }
+                                    }
+                                }
+                            ]
+
+                            // Authentic macOS Screen Recording Icon (SF Symbol: record.circle)
+                            Item {
+                                anchors.centerIn: parent
+                                width: 30
+                                height: 30
+
+                                // Outer concentric ring
+                                Rectangle {
+                                    anchors.fill: parent
+                                    radius: width / 2
+                                    color: "transparent"
+                                    border.color: root.screenRecordingActive ? "#ff3b30" : "#ffffff"
+                                    border.width: 2.4
+                                    Behavior on border.color { ColorAnimation { duration: 250 } }
+                                }
+
+                                // Inner solid dot (macOS concentric filled center)
+                                Rectangle {
+                                    width: root.screenRecordingActive ? 11 : 11
+                                    height: root.screenRecordingActive ? 11 : 11
+                                    radius: root.screenRecordingActive ? 3 : (width / 2)
+                                    anchors.centerIn: parent
+                                    color: root.screenRecordingActive ? "#ff3b30" : "#ffffff"
+                                    Behavior on color { ColorAnimation { duration: 250 } }
+                                    Behavior on radius { NumberAnimation { duration: 200 } }
+
+                                    SequentialAnimation on opacity {
+                                        running: root.screenRecordingActive
+                                        loops: Animation.Infinite
+                                        NumberAnimation { to: 0.35; duration: 750; easing.type: Easing.InOutQuad }
+                                        NumberAnimation { to: 1.0; duration: 750; easing.type: Easing.InOutQuad }
+                                    }
+                                }
+                            }
+
+                            MouseArea {
+                                id: recBtnMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (root.screenRecordingActive) {
+                                        root.stopScreenRecording()
+                                    } else {
+                                        root.close()
+                                        root.runShell("quickshell ipc call screenrecord open &")
+                                    }
+                                }
+                            }
+                        }
+
+                        LiquidGlassCard {
+                            id: castCard
+                            Layout.preferredWidth: 74
+                            Layout.preferredHeight: 74
+                            cardRadius: 37
+                            isHovered: castBtnMouse.containsMouse
+                            isPressed: castBtnMouse.pressed
+                            isActive: root.castConnected
+                            activeColor: "#ffffff"
+                            activeBorderColor: Qt.rgba(0.0, 0.48, 1.0, 0.5)
+                            activeRimColor: Qt.rgba(0.0, 0.48, 1.0, 0.25)
+                            idleColor: Theme.cardIdleColor
+
+                            transform: [
+                                Scale {
+                                    id: castScale
+                                    origin.x: castCard.width / 2
+                                    origin.y: castCard.height / 2
+                                    xScale: 0.75
+                                    yScale: 0.75
+                                },
+                                Translate {
+                                    id: castTrans
+                                    y: -20
+                                }
+                            ]
+                            opacity: 0.0
+
+                            state: root.open ? "open" : "closed"
+                            states: [
+                                State {
+                                    name: "open"
+                                    PropertyChanges { target: castScale; xScale: 1.0; yScale: 1.0 }
+                                    PropertyChanges { target: castTrans; y: 0 }
+                                    PropertyChanges { target: castCard; opacity: 1.0 }
+                                },
+                                State {
+                                    name: "closed"
+                                    PropertyChanges { target: castScale; xScale: 0.75; yScale: 0.75 }
+                                    PropertyChanges { target: castTrans; y: -20 }
+                                    PropertyChanges { target: castCard; opacity: 0.0 }
+                                }
+                            ]
+                            transitions: [
+                                Transition {
+                                    from: "closed"; to: "open"
+                                    SequentialAnimation {
+                                        PropertyAction { target: castTrans; property: "y"; value: -20 }
+                                        PropertyAction { target: castScale; property: "xScale"; value: 0.75 }
+                                        PropertyAction { target: castScale; property: "yScale"; value: 0.75 }
+                                        PropertyAction { target: castCard; property: "opacity"; value: 1.0 }
+                                        PauseAnimation { duration: 70 }
+                                        ParallelAnimation {
+                                            NumberAnimation { target: castTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                            NumberAnimation { target: castScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                            NumberAnimation { target: castScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        }
+                                    }
+                                },
+                                Transition {
+                                    from: "open"; to: "closed"
+                                    SequentialAnimation {
+                                        PauseAnimation { duration: 38 }
+                                        ParallelAnimation {
+                                            NumberAnimation { target: castTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                            NumberAnimation { target: castScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                            NumberAnimation { target: castScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                            SequentialAnimation {
+                                                PauseAnimation { duration: 250 }
+                                                NumberAnimation { target: castCard; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
+                                            }
+                                        }
+                                        PropertyAction { target: castTrans; property: "y"; value: -20 }
+                                        PropertyAction { target: castScale; property: "xScale"; value: 0.75 }
+                                        PropertyAction { target: castScale; property: "yScale"; value: 0.75 }
+                                    }
+                                }
+                            ]
+
+                            Text {
+                                anchors.centerIn: parent
+                                font.family: root.iconFont
+                                font.pixelSize: 30
+                                color: root.castConnected ? "#007aff" : "#ffffff"
+                                text: "󰄘"
+                                renderType: Text.QtRendering
+                                Behavior on color { ColorAnimation { duration: 250 } }
+                            }
+
+                            MouseArea {
+                                id: castBtnMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.openCastMenu()
+                            }
+                        }
+                    }
+                }
+
+                // 4.2 Right: Power Mode Widget (182x70)
+                    PowerModeWidget {
+                        id: pwrCard
+                        Layout.preferredWidth: 182
+                        Layout.preferredHeight: 70
+                        Layout.alignment: Qt.AlignTop
+                        activeMode: root.powerActiveMode
+                        onClicked: root.openPowerMenu()
+                        onModeChanged: (m) => root.setPowerMode(m)
+
+                        transform: [
+                            Scale {
+                                id: pwrScale
+                                origin.x: pwrCard.width / 2
+                                origin.y: pwrCard.height / 2
+                                xScale: 0.75
+                                yScale: 0.75
+                            },
+                            Translate {
+                                id: pwrTrans
+                                y: -20
+                            }
+                        ]
+                        opacity: 0.0
+
+                        state: root.open ? "open" : "closed"
+                        states: [
+                            State {
+                                name: "open"
+                                PropertyChanges { target: pwrScale; xScale: 1.0; yScale: 1.0 }
+                                PropertyChanges { target: pwrTrans; y: 0 }
+                                PropertyChanges { target: pwrCard; opacity: 1.0 }
+                            },
+                            State {
+                                name: "closed"
+                                PropertyChanges { target: pwrScale; xScale: 0.75; yScale: 0.75 }
+                                PropertyChanges { target: pwrTrans; y: -20 }
+                                PropertyChanges { target: pwrCard; opacity: 0.0 }
+                            }
+                        ]
+                        transitions: [
+                            Transition {
+                                from: "closed"; to: "open"
+                                SequentialAnimation {
+                                    PropertyAction { target: pwrTrans; property: "y"; value: -20 }
+                                    PropertyAction { target: pwrScale; property: "xScale"; value: 0.75 }
+                                    PropertyAction { target: pwrScale; property: "yScale"; value: 0.75 }
+                                    PropertyAction { target: pwrCard; property: "opacity"; value: 1.0 }
+                                    PauseAnimation { duration: 70 }
+                                    ParallelAnimation {
+                                        NumberAnimation { target: pwrTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: pwrScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: pwrScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    }
+                                }
+                            },
+                            Transition {
+                                from: "open"; to: "closed"
+                                SequentialAnimation {
+                                    PauseAnimation { duration: 38 }
+                                    ParallelAnimation {
+                                        NumberAnimation { target: pwrTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: pwrScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: pwrScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        SequentialAnimation {
+                                            PauseAnimation { duration: 250 }
+                                            NumberAnimation { target: pwrCard; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
+                                        }
+                                    }
+                                    PropertyAction { target: pwrTrans; property: "y"; value: -20 }
+                                    PropertyAction { target: pwrScale; property: "xScale"; value: 0.75 }
+                                    PropertyAction { target: pwrScale; property: "yScale"; value: 0.75 }
+                                }
+                            }
+                        ]
+                    }
+
+
             }
         }
 
@@ -3287,7 +4012,7 @@ PanelWindow {
             opacity: 0.0
             visible: opacity > 0.001
 
-            Component.onCompleted: root.setupMenuOrigin(btMenuCard, btCard, 97, -140, 0.484, 0.200, 175)
+            Component.onCompleted: root.setupMenuOrigin(btMenuCard, btCard, -97, -53, 0.484, 0.200, 175)
 
             transform: [
                 Scale {
@@ -3646,11 +4371,17 @@ PanelWindow {
                                             font.pixelSize: 16
                                             color: "#ffffff"
                                             text: {
+                                                if (modelData.iconType === "earbuds" || modelData.iconType === "tws") return "󱡏"
                                                 if (modelData.iconType === "headphones") return "󰋋"
+                                                if (modelData.iconType === "earphones") return "󰋌"
+                                                if (modelData.iconType === "headset") return "󰋎"
+                                                if (modelData.iconType === "speaker") return "󰓃"
+                                                if (modelData.iconType === "gamepad") return "󰊴"
                                                 if (modelData.iconType === "mouse") return "󰍽"
                                                 if (modelData.iconType === "keyboard") return "󰌌"
                                                 if (modelData.iconType === "phone") return "󰄜"
                                                 if (modelData.iconType === "watch") return "󰃭"
+                                                if (modelData.iconType === "laptop") return "󰌢"
                                                 return "󰂯"
                                             }
                                             renderType: Text.QtRendering
@@ -3697,7 +4428,7 @@ PanelWindow {
                                             }
 
                                             Text {
-                                                visible: modelData.battery !== ""
+                                                visible: modelData.battery !== "" && modelData.battery !== null && modelData.battery !== undefined
                                                 text: "• " + modelData.battery + "%"
                                                 font.family: root.sfFont
                                                 font.pixelSize: 12
@@ -4079,13 +4810,23 @@ PanelWindow {
                             // Handle Knob
                             Rectangle {
                                 id: subVolHandle
-                                width: 16; height: 16
+                                width: subVolSliderMouse.pressed ? 26 : (subVolSliderMouse.containsMouse ? 24 : 22)
+                                height: 16
                                 radius: 8
                                 color: "#ffffff"
+                                border.color: root.isMuted ? "#94a3b8" : (subVolSliderMouse.pressed ? "#ffffff" : "#cbd5e1")
+                                border.width: 1.2
                                 anchors.verticalCenter: parent.verticalCenter
                                 x: Math.max(0, Math.min(parent.width - width, parent.width * subVolSliderItem.fillFraction - width / 2))
-                                scale: subVolSliderItem.sliderPressed ? 1.25 : 1.0
-                                Behavior on scale { NumberAnimation { duration: 120 } }
+                                opacity: 1.0
+                                scale: subVolSliderMouse.pressed ? 1.08 : (subVolSliderMouse.containsMouse ? 1.04 : 1.0)
+
+                                Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                                Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutBack } }
+                                Behavior on x {
+                                    enabled: !subVolSliderMouse.pressed
+                                    NumberAnimation { duration: 80; easing.type: Easing.OutQuad }
+                                }
                             }
                         }
 
@@ -4122,12 +4863,222 @@ PanelWindow {
                 }
 
                 // Small gap below slider
-                Item { Layout.preferredHeight: 6 }
+                Item { Layout.preferredHeight: 4 }
+
+                // ── Multi-Mixer Toggle Row ────────────────────────────
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 52
+                    radius: 12
+                    color: root.multiMixerEnabled ? "#26007aff" : (multiMixerMouse.containsMouse ? "#20ffffff" : "#12ffffff")
+                    border.color: root.multiMixerEnabled ? "#8060a5fa" : (multiMixerMouse.containsMouse ? "#30ffffff" : "#18ffffff")
+                    border.width: 1
+
+                    Behavior on color { ColorAnimation { duration: 150 } }
+                    Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                    scale: multiMixerMouse.pressed ? 0.98 : 1.0
+                    Behavior on scale {
+                        NumberAnimation { duration: multiMixerMouse.pressed ? 80 : 180; easing.type: Easing.OutBack }
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 10
+
+                        // 1. Multi-Mixer Icon badge (Left)
+                        Rectangle {
+                            Layout.alignment: Qt.AlignVCenter
+                            Layout.preferredWidth: 30
+                            Layout.preferredHeight: 30
+                            radius: 15
+                            color: root.multiMixerEnabled ? "#007aff" : "#20ffffff"
+                            Behavior on color { ColorAnimation { duration: 150 } }
+
+                            Text {
+                                anchors.centerIn: parent
+                                font.family: root.iconFont
+                                font.pixelSize: 16
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                                text: "󰓃"
+                            }
+                        }
+
+                        // 2. Typography: Title & Body Desc
+                        ColumnLayout {
+                            Layout.alignment: Qt.AlignVCenter
+                            spacing: 1
+
+                            Text {
+                                text: "Multi-Mixer"
+                                font.family: root.sfFont
+                                font.pixelSize: 15
+                                font.bold: true
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+
+                            Text {
+                                text: root.multiMixerEnabled ? (root.multiMixerSlaves.length + (root.multiMixerSlaves.length === 1 ? " device playing" : " devices playing")) : "Play across multiple devices"
+                                font.family: root.sfFont
+                                font.pixelSize: 13
+                                color: root.multiMixerEnabled ? "#93c5fd" : "#80ffffff"
+                                renderType: Text.QtRendering
+                            }
+                        }
+
+                        // 3. Elastic Spacer (pushes switch to the EXTREME RIGHT)
+                        Item {
+                            Layout.fillWidth: true
+                        }
+
+                        // 4. Wide macOS Style Switch Pill (Extreme Right, Fixed 44x24)
+                        Rectangle {
+                            id: multiMixerPill
+                            Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                            Layout.preferredWidth: 44
+                            Layout.preferredHeight: 24
+                            radius: 12
+                            color: root.multiMixerEnabled ? "#007aff" : "#3a3a3c"
+                            Behavior on color { ColorAnimation { duration: 160 } }
+
+                            Rectangle {
+                                id: multiMixerKnob
+                                width: 20
+                                height: 20
+                                radius: 10
+                                color: "#ffffff"
+                                anchors.verticalCenter: parent.verticalCenter
+                                x: root.multiMixerEnabled ? 22 : 2
+                                Behavior on x { NumberAnimation { duration: 180; easing.type: Easing.OutBack; easing.overshoot: 1.25 } }
+                            }
+                        }
+                    }
+
+                    MouseArea {
+                        id: multiMixerMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.toggleMultiMixer()
+                    }
+                }
+
+                // ── Sync Delay Calibration Row (When Mixed BT + Speaker Active) ──
+                Rectangle {
+                    visible: root.multiMixerEnabled && root.multiMixerIsMixed
+                    Layout.fillWidth: true
+                    implicitHeight: 38
+                    radius: 10
+                    color: "#18007aff"
+                    border.color: "#3060a5fa"
+                    border.width: 1
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 8
+
+                        Text {
+                            font.family: root.iconFont
+                            font.pixelSize: 15
+                            color: "#60a5fa"
+                            text: "󰔛"
+                            renderType: Text.QtRendering
+                        }
+
+                        Text {
+                            text: "Sync Delay"
+                            font.family: root.sfFont
+                            font.pixelSize: 13
+                            font.bold: true
+                            color: "#ffffff"
+                            renderType: Text.QtRendering
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        // Nudge Down Button [-]
+                        Rectangle {
+                            implicitWidth: 26
+                            implicitHeight: 26
+                            radius: 13
+                            color: syncMinusMouse.containsMouse ? "#30ffffff" : "#1affffff"
+                            border.color: "#30ffffff"
+                            border.width: 1
+
+                            Text {
+                                anchors.centerIn: parent
+                                font.family: root.sfFont
+                                font.pixelSize: 15
+                                font.bold: true
+                                color: "#ffffff"
+                                text: "−"
+                                renderType: Text.QtRendering
+                            }
+
+                            MouseArea {
+                                id: syncMinusMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.nudgeMultiMixerDelay(-10)
+                            }
+                        }
+
+                        // Delay Readout
+                        Text {
+                            font.family: root.sfFont
+                            font.pixelSize: 13
+                            font.bold: true
+                            color: "#93c5fd"
+                            text: root.multiMixerSyncDelay + " ms"
+                            renderType: Text.QtRendering
+                            Layout.preferredWidth: 54
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+
+                        // Nudge Up Button [+]
+                        Rectangle {
+                            implicitWidth: 26
+                            implicitHeight: 26
+                            radius: 13
+                            color: syncPlusMouse.containsMouse ? "#30ffffff" : "#1affffff"
+                            border.color: "#30ffffff"
+                            border.width: 1
+
+                            Text {
+                                anchors.centerIn: parent
+                                font.family: root.sfFont
+                                font.pixelSize: 15
+                                font.bold: true
+                                color: "#ffffff"
+                                text: "+"
+                                renderType: Text.QtRendering
+                            }
+
+                            MouseArea {
+                                id: syncPlusMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.nudgeMultiMixerDelay(10)
+                            }
+                        }
+                    }
+                }
+
+                // Small gap below Multi-Mixer toggle
+                Item { Layout.preferredHeight: 4 }
 
                 // Output Sinks List (15px SF Pro Rounded text & 30px icons matching MediaMenu)
                 Item {
                     Layout.fillWidth: true
-                    implicitHeight: Math.min(220, sinkCol.implicitHeight)
+                    implicitHeight: Math.min(270, sinkCol.implicitHeight)
                     clip: true
 
                     Flickable {
@@ -4145,57 +5096,200 @@ PanelWindow {
                                 model: root.getAudioOutputSinks()
 
                                 delegate: Rectangle {
+                                    id: sinkTileRect
                                     Layout.fillWidth: true
-                                    implicitHeight: 42
+                                    implicitHeight: isVolumeAdjusting ? 74 : 42
+                                    Behavior on implicitHeight { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                                     radius: 10
 
-                                    property bool isDefault: {
+                                    property bool isSinkActive: {
+                                        if (root.multiMixerEnabled) {
+                                            return root.multiMixerSlaves && root.multiMixerSlaves.includes(modelData.name)
+                                        }
                                         const def = Pipewire.defaultAudioSink
                                         return def !== null && def !== undefined && def.id === modelData.id
                                     }
 
-                                    color: isDefault ? "#33007aff" : (sinkMouse.containsMouse ? "#20ffffff" : "#10ffffff")
+                                    property bool isVolumeAdjusting: root.multiMixerEnabled && root.multiMixerVolumeDevice === modelData.name
+
+                                    color: {
+                                        if (isVolumeAdjusting) return "#3310b981"
+                                        if (isSinkActive) return "#33007aff"
+                                        return sinkMouse.containsMouse ? "#20ffffff" : "#10ffffff"
+                                    }
                                     Behavior on color { ColorAnimation { duration: 150 } }
-                                    border.color: isDefault ? "#8060a5fa" : "transparent"
+
+                                    border.color: {
+                                        if (isVolumeAdjusting) return "#8034d399"
+                                        if (isSinkActive) return "#8060a5fa"
+                                        return "transparent"
+                                    }
                                     border.width: 1
                                     clip: true
 
-                                    scale: sinkMouse.pressed ? 0.96 : 1.0
+                                    scale: (sinkMouse.pressed && !isVolumeAdjusting) ? 0.96 : 1.0
                                     Behavior on scale {
                                         NumberAnimation { duration: sinkMouse.pressed ? 80 : 200; easing.type: sinkMouse.pressed ? Easing.InCubic : Easing.OutBack; easing.overshoot: 1.2 }
                                     }
 
-                                    RowLayout {
+                                    ColumnLayout {
                                         anchors.fill: parent
                                         anchors.leftMargin: 10
                                         anchors.rightMargin: 10
-                                        spacing: 10
+                                        anchors.topMargin: isVolumeAdjusting ? 7 : 0
+                                        anchors.bottomMargin: isVolumeAdjusting ? 7 : 0
+                                        spacing: 5
 
-                                        // Device Icon badge (30x30)
-                                        Rectangle {
-                                            Layout.preferredWidth: 30
-                                            Layout.preferredHeight: 30
-                                            radius: 15
-                                            color: isDefault ? "#007aff" : "#20ffffff"
+                                        // Header Row: Icon Badge + Device Name + Volume %
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 32
+                                            spacing: 10
+
+                                            // Device Icon badge (30x30)
+                                            Rectangle {
+                                                Layout.preferredWidth: 30
+                                                Layout.preferredHeight: 30
+                                                radius: 15
+                                                color: {
+                                                    if (isVolumeAdjusting) return "#10b981"
+                                                    if (isSinkActive) return "#007aff"
+                                                    return "#20ffffff"
+                                                }
+                                                Behavior on color { ColorAnimation { duration: 150 } }
+
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    font.family: root.iconFont
+                                                    font.pixelSize: 17
+                                                    color: "#ffffff"
+                                                    renderType: Text.QtRendering
+                                                    text: root.getSinkIcon(modelData)
+                                                }
+                                            }
 
                                             Text {
-                                                anchors.centerIn: parent
-                                                font.family: root.iconFont
-                                                font.pixelSize: 17
+                                                Layout.fillWidth: true
+                                                font.family: root.sfFont
+                                                font.pixelSize: 15
                                                 color: "#ffffff"
                                                 renderType: Text.QtRendering
-                                                text: root.getSinkIcon(modelData)
+                                                text: modelData.description || modelData.nickname || modelData.name || "Unknown Device"
+                                                elide: Text.ElideRight
+                                            }
+
+                                            // Green Volume Percentage Badge
+                                            Text {
+                                                visible: isVolumeAdjusting
+                                                font.family: root.sfFont
+                                                font.pixelSize: 13
+                                                font.bold: true
+                                                color: "#34d399"
+                                                renderType: Text.QtRendering
+                                                text: {
+                                                    const vol = (modelData && modelData.audio) ? modelData.audio.volume : 0
+                                                    return Math.round(Math.max(0, Math.min(1.0, vol)) * 100) + "%"
+                                                }
                                             }
                                         }
 
-                                        Text {
+                                        // Inline Volume Slider (Only visible in green volume adjusting mode)
+                                        Item {
+                                            id: devVolSliderContainer
+                                            visible: isVolumeAdjusting
+                                            opacity: isVolumeAdjusting ? 1.0 : 0.0
+                                            Behavior on opacity { NumberAnimation { duration: 150 } }
                                             Layout.fillWidth: true
-                                            font.family: root.sfFont
-                                            font.pixelSize: 15
-                                            color: "#ffffff"
-                                            renderType: Text.QtRendering
-                                            text: modelData.description || modelData.nickname || modelData.name || "Unknown Device"
-                                            elide: Text.ElideRight
+                                            Layout.preferredHeight: 20
+
+                                            property real fillFraction: {
+                                                if (!modelData || !modelData.audio) return 0
+                                                return Math.max(0, Math.min(1.0, modelData.audio.volume))
+                                            }
+
+                                            Rectangle {
+                                                id: devVolTrack
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                anchors.left: parent.left
+                                                anchors.right: parent.right
+                                                height: 6
+                                                radius: 3
+                                                color: "#33ffffff"
+
+                                                Rectangle {
+                                                    anchors.left: parent.left
+                                                    anchors.top: parent.top
+                                                    anchors.bottom: parent.bottom
+                                                    width: parent.width * devVolSliderContainer.fillFraction
+                                                    radius: 3
+                                                    color: "#10b981"
+                                                }
+
+                                                Rectangle {
+                                                    id: devVolThumb
+                                                    width: devVolSliderMouse.pressed ? 20 : (devVolSliderMouse.containsMouse ? 18 : 16)
+                                                    height: 14
+                                                    radius: 7
+                                                    color: "#ffffff"
+                                                    border.color: devVolSliderMouse.pressed ? "#ffffff" : "#a7f3d0"
+                                                    border.width: 1.2
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    x: Math.max(0, Math.min(parent.width - width, parent.width * devVolSliderContainer.fillFraction - width / 2))
+                                                    scale: devVolSliderMouse.pressed ? 1.1 : 1.0
+
+                                                    Behavior on width { NumberAnimation { duration: 100 } }
+                                                    Behavior on scale { NumberAnimation { duration: 100 } }
+                                                    Behavior on x {
+                                                        enabled: !devVolSliderMouse.pressed
+                                                        NumberAnimation { duration: 60; easing.type: Easing.OutQuad }
+                                                    }
+                                                }
+                                            }
+
+                                            MouseArea {
+                                                id: devVolSliderMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                preventStealing: true
+
+                                                function setDevVol(mouseX) {
+                                                    if (!modelData || !modelData.audio) return
+                                                    const frac = Math.max(0, Math.min(1.0, mouseX / devVolTrack.width))
+                                                    modelData.audio.volume = frac
+                                                    if (modelData.audio.muted) modelData.audio.muted = false
+                                                    root.runShell("wpctl set-volume " + modelData.id + " " + frac.toFixed(3))
+                                                }
+
+                                                onPressed: function(mouse) { setDevVol(mouse.x) }
+                                                onPositionChanged: function(mouse) { if (pressed) setDevVol(mouse.x) }
+                                                onReleased: {
+                                                    if (!sinkMouse.containsMouse) {
+                                                        exitDelayTimer.restart()
+                                                    }
+                                                }
+                                                onWheel: function(wheel) {
+                                                    if (!modelData || !modelData.audio) return
+                                                    const delta = wheel.angleDelta.y > 0 ? 0.05 : -0.05
+                                                    const target = Math.max(0, Math.min(1.0, modelData.audio.volume + delta))
+                                                    modelData.audio.volume = target
+                                                    if (modelData.audio.muted) modelData.audio.muted = false
+                                                    root.runShell("wpctl set-volume " + modelData.id + " " + target.toFixed(3))
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Timer {
+                                        id: exitDelayTimer
+                                        interval: 120
+                                        repeat: false
+                                        onTriggered: {
+                                            if (!sinkMouse.containsMouse && !devVolSliderMouse.containsMouse && !devVolSliderMouse.pressed) {
+                                                if (root.multiMixerVolumeDevice === modelData.name) {
+                                                    root.multiMixerVolumeDevice = ""
+                                                }
+                                            }
                                         }
                                     }
 
@@ -4204,10 +5298,48 @@ PanelWindow {
                                         anchors.fill: parent
                                         hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            if (modelData) {
-                                                Pipewire.preferredDefaultAudioSink = modelData
-                                                root.runShell("wpctl set-default " + modelData.id)
+                                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+
+                                        onClicked: function(mouse) {
+                                            if (!modelData) return
+                                            if (mouse.button === Qt.RightButton) {
+                                                if (root.multiMixerEnabled) {
+                                                    if (root.multiMixerVolumeDevice === modelData.name) {
+                                                        root.multiMixerVolumeDevice = ""
+                                                    } else {
+                                                        if (!root.multiMixerSlaves || !root.multiMixerSlaves.includes(modelData.name)) {
+                                                            root.toggleMultiMixerSink(modelData.name)
+                                                        }
+                                                        root.multiMixerVolumeDevice = modelData.name
+                                                    }
+                                                }
+                                            } else if (mouse.button === Qt.LeftButton) {
+                                                if (root.multiMixerEnabled) {
+                                                    if (root.multiMixerVolumeDevice === modelData.name) {
+                                                        root.multiMixerVolumeDevice = ""
+                                                    }
+                                                    root.toggleMultiMixerSink(modelData.name)
+                                                } else {
+                                                    Pipewire.preferredDefaultAudioSink = modelData
+                                                    root.runShell("wpctl set-default " + modelData.id)
+                                                }
+                                            }
+                                        }
+
+                                        onExited: {
+                                            if (root.multiMixerEnabled && root.multiMixerVolumeDevice === modelData.name) {
+                                                if (devVolSliderMouse.pressed) return
+                                                exitDelayTimer.restart()
+                                            }
+                                        }
+
+                                        onWheel: function(wheel) {
+                                            if (isVolumeAdjusting && modelData && modelData.audio) {
+                                                const delta = wheel.angleDelta.y > 0 ? 0.05 : -0.05
+                                                const target = Math.max(0, Math.min(1.0, modelData.audio.volume + delta))
+                                                modelData.audio.volume = target
+                                                if (modelData.audio.muted) modelData.audio.muted = false
+                                                root.runShell("wpctl set-volume " + modelData.id + " " + target.toFixed(3))
                                             }
                                         }
                                     }
@@ -4246,7 +5378,7 @@ PanelWindow {
             opacity: 0.0
             visible: opacity > 0.001
 
-            Component.onCompleted: root.setupMenuOrigin(powerMenuCard, pwrCard, 97, -73, 0.511, 0.184, 190)
+            Component.onCompleted: root.setupMenuOrigin(powerMenuCard, pwrCard, 97, 180, 0.511, 0.184, 190)
 
             transform: [
                 Scale {
@@ -4361,9 +5493,17 @@ PanelWindow {
                     icon: "󰈸"
                 },
                 {
+                    key: "boost",
+                    title: "Boost 25W",
+                    sub: "25W / 100°C",
+                    watt: "25W",
+                    col: "#a855f7",
+                    icon: "󰌠"
+                },
+                {
                     key: "balanced",
                     title: "Balanced 15W",
-                    sub: "15W / 90°C",
+                    sub: "15W / 100°C",
                     watt: "15W",
                     col: "#0ea5e9",
                     icon: "󰞬"
@@ -4371,7 +5511,7 @@ PanelWindow {
                 {
                     key: "batterysaver",
                     title: "Battery Saver 10W",
-                    sub: "10W / 80°C",
+                    sub: "10W / 100°C",
                     watt: "10W",
                     col: "#10b981",
                     icon: "󰌪"
@@ -4518,9 +5658,13 @@ PanelWindow {
                                 // Succinct Profile Details (SF Pro Rounded Typography - 15px / 12px)
                                 ColumnLayout {
                                     Layout.fillWidth: true
+                                    Layout.alignment: Qt.AlignLeft | Qt.AlignVCenter
                                     spacing: 2
 
                                     Text {
+                                        Layout.fillWidth: true
+                                        Layout.alignment: Qt.AlignLeft
+                                        horizontalAlignment: Text.AlignLeft
                                         text: modelData.title
                                         font.family: root.sfFontBold
                                         font.pixelSize: 15
@@ -4530,6 +5674,9 @@ PanelWindow {
                                     }
 
                                     Text {
+                                        Layout.fillWidth: true
+                                        Layout.alignment: Qt.AlignLeft
+                                        horizontalAlignment: Text.AlignLeft
                                         text: modelData.sub
                                         font.family: root.sfFont
                                         font.pixelSize: 12
@@ -4824,26 +5971,29 @@ PanelWindow {
                                     color: "#ffffff"
                                     Behavior on width {
                                         enabled: !subBrightSliderMouse.pressed
-                                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                                        NumberAnimation { duration: 80; easing.type: Easing.OutQuad }
                                     }
                                 }
 
                                 Rectangle {
                                     id: subBrightKnob
-                                    width: 16
+                                    width: subBrightSliderMouse.pressed ? 26 : (subBrightSliderMouse.containsMouse ? 24 : 22)
                                     height: 16
                                     radius: 8
                                     color: "#ffffff"
-                                    border.color: "#e2e8f0"
-                                    border.width: 1.5
+                                    border.color: subBrightSliderMouse.pressed ? "#ffffff" : "#cbd5e1"
+                                    border.width: 1.2
                                     anchors.verticalCenter: parent.verticalCenter
                                     x: Math.max(0, Math.min(parent.width - width, parent.width * subBrightSliderItem.fillFraction - width / 2))
-                                    scale: subBrightSliderItem.sliderPressed ? 1.25 : 1.0
+                                    opacity: 1.0
+                                    scale: subBrightSliderMouse.pressed ? 1.08 : (subBrightSliderMouse.containsMouse ? 1.04 : 1.0)
+
+                                    Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                                    Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutBack } }
                                     Behavior on x {
                                         enabled: !subBrightSliderMouse.pressed
-                                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                                        NumberAnimation { duration: 80; easing.type: Easing.OutQuad }
                                     }
-                                    Behavior on scale { NumberAnimation { duration: 120 } }
                                 }
                             }
 
@@ -5797,6 +6947,515 @@ PanelWindow {
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // VIEW 7: macOS SCREEN MIRRORING & CASTING SUB-MENU
+        // ══════════════════════════════════════════════════════════════
+        LiquidGlassCard {
+            id: castMenuCard
+            width: 376
+            height: Math.min(Screen.height - 60, castCol.implicitHeight + 28)
+            cardRadius: dynamicRadius
+            clip: true
+
+            // Pop out and merge back into originating castCard widget
+            property real startTransX: -40
+            property real startTransY: 180
+            property real startScaleX: 0.197
+            property real startScaleY: 0.218
+            property real startRadius: 37
+
+            property real contentScaleX: startScaleX
+            property real contentScaleY: startScaleY
+            property real contentTransX: startTransX
+            property real contentTransY: startTransY
+            property real dynamicRadius: startRadius
+            property real contentOpacity: 0.0
+
+            opacity: 0.0
+            visible: opacity > 0.001
+
+            Component.onCompleted: root.setupMenuOrigin(castMenuCard, castCard, -40, 180, 0.197, 0.218, 37)
+
+            transform: [
+                Scale {
+                    origin.x: castMenuCard.width / 2
+                    origin.y: castMenuCard.height / 2
+                    xScale: castMenuCard.contentScaleX
+                    yScale: castMenuCard.contentScaleY
+                },
+                Translate {
+                    x: castMenuCard.contentTransX
+                    y: castMenuCard.contentTransY
+                }
+            ]
+
+            states: [
+                State {
+                    name: "open"
+                    when: root.currentView === "cast"
+                    PropertyChanges {
+                        target: castMenuCard
+                        opacity: 1.0
+                        contentScaleX: 1.0
+                        contentScaleY: 1.0
+                        contentTransX: 0
+                        contentTransY: 0
+                        dynamicRadius: 28
+                        contentOpacity: 1.0
+                    }
+                },
+                State {
+                    name: "closed"
+                    when: root.currentView !== "cast"
+                    PropertyChanges {
+                        target: castMenuCard
+                        opacity: 0.0
+                        contentScaleX: castMenuCard.startScaleX
+                        contentScaleY: castMenuCard.startScaleY
+                        contentTransX: castMenuCard.startTransX
+                        contentTransY: castMenuCard.startTransY
+                        dynamicRadius: castMenuCard.startRadius
+                        contentOpacity: 0.0
+                    }
+                }
+            ]
+
+            transitions: [
+                Transition {
+                    from: "closed"; to: "open"
+                    ParallelAnimation {
+                        NumberAnimation {
+                            target: castMenuCard; property: "opacity"
+                            duration: 110; easing.type: Easing.OutQuad
+                        }
+                        SequentialAnimation {
+                            PauseAnimation { duration: 60 }
+                            NumberAnimation {
+                                target: castMenuCard; property: "contentOpacity"
+                                duration: 240; easing.type: Easing.OutQuad
+                            }
+                        }
+                        NumberAnimation {
+                            target: castMenuCard
+                            properties: "contentScaleX,contentScaleY,contentTransX,contentTransY,dynamicRadius"
+                            duration: 540
+                            easing.type: Easing.BezierSpline
+                            easing.bezierCurve: root.springCurve
+                        }
+                    }
+                },
+                Transition {
+                    from: "open"; to: "closed"
+                    ParallelAnimation {
+                        NumberAnimation {
+                            target: castMenuCard; property: "contentOpacity"
+                            to: 0.0
+                            duration: 110; easing.type: Easing.OutQuad
+                        }
+                        SequentialAnimation {
+                            PauseAnimation { duration: 320 }
+                            NumberAnimation {
+                                target: castMenuCard; property: "opacity"
+                                to: 0.0
+                                duration: 180; easing.type: Easing.OutQuad
+                            }
+                        }
+                        NumberAnimation {
+                            target: castMenuCard
+                            properties: "contentScaleX,contentScaleY,contentTransX,contentTransY,dynamicRadius"
+                            duration: 500
+                            easing.type: Easing.BezierSpline
+                            easing.bezierCurve: root.springCurve
+                        }
+                    }
+                }
+            ]
+
+            Flickable {
+                id: castFlick
+                opacity: castMenuCard.contentOpacity
+                anchors.fill: parent
+                anchors.margins: 14
+                contentHeight: castCol.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                ColumnLayout {
+                    id: castCol
+                    width: castFlick.width
+                    spacing: 12
+
+                    // Header: < Back | Screen Mirroring | [Stop / Disconnect]
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+
+                        Rectangle {
+                            Layout.preferredWidth: 34
+                            Layout.preferredHeight: 34
+                            radius: 17
+                            color: backCastMouse.containsMouse ? "#30ffffff" : "transparent"
+
+                            Text {
+                                anchors.centerIn: parent
+                                font.family: root.iconFont
+                                font.pixelSize: 20
+                                color: "#ffffff"
+                                text: "󰁍"
+                                renderType: Text.QtRendering
+                            }
+
+                            MouseArea {
+                                id: backCastMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.goBack()
+                            }
+                        }
+
+                        Text {
+                            text: "Screen Mirroring"
+                            font.family: root.sfFont
+                            font.pixelSize: 20
+                            color: "#ffffff"
+                            renderType: Text.QtRendering
+                            Layout.fillWidth: true
+                        }
+
+                        // Disconnect Action Pill (Visible when connected)
+                        Rectangle {
+                            visible: root.castConnected
+                            implicitWidth: 64
+                            implicitHeight: 28
+                            radius: 14
+                            color: stopCastMouse.containsMouse ? "#dc2626" : "#ef4444"
+                            Behavior on color { ColorAnimation { duration: 150 } }
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "Stop"
+                                font.family: root.sfFontMedium
+                                font.pixelSize: 13
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+
+                            MouseArea {
+                                id: stopCastMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.disconnectCast()
+                            }
+                        }
+                    }
+
+                    // Active Connection Status Card (Visible when connected)
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 64
+                        radius: 14
+                        visible: root.castConnected
+                        color: "#202563eb"
+                        border.color: "#8060a5fa"
+                        border.width: 1
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            spacing: 12
+
+                            Rectangle {
+                                Layout.preferredWidth: 40
+                                Layout.preferredHeight: 40
+                                radius: 20
+                                color: "#007aff"
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    font.family: root.iconFont
+                                    font.pixelSize: 22
+                                    color: "#ffffff"
+                                    text: "󰄘"
+                                    renderType: Text.QtRendering
+                                }
+                            }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+
+                                Text {
+                                    text: "Connected to " + (root.castConnectedDevice !== "" ? root.castConnectedDevice : "Wireless Display")
+                                    font.family: root.sfFontMedium
+                                    font.pixelSize: 15
+                                    color: "#ffffff"
+                                    renderType: Text.QtRendering
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+
+                                Text {
+                                    text: "Ultra-Low Latency Wireless Stream Active"
+                                    font.family: root.sfFont
+                                    font.pixelSize: 12
+                                    color: "#93c5fd"
+                                    renderType: Text.QtRendering
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+                            }
+                        }
+                    }
+
+                    // Section Header: "Available Displays" + MacSpinner / Reload
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        Text {
+                            text: "Available Displays"
+                            font.family: root.sfFontMedium
+                            font.pixelSize: 15
+                            color: "#93c5fd"
+                            renderType: Text.QtRendering
+                            Layout.fillWidth: true
+                        }
+
+                        MacSpinner {
+                            size: 18
+                            running: root.castScanning
+                            visible: root.castScanning
+                            spokeColor: "#60a5fa"
+                        }
+
+                        Rectangle {
+                            visible: !root.castScanning
+                            implicitWidth: 26
+                            implicitHeight: 26
+                            radius: 13
+                            color: castReloadMouse.containsMouse ? "#30ffffff" : "transparent"
+
+                            Text {
+                                anchors.centerIn: parent
+                                font.family: root.iconFont
+                                font.pixelSize: 16
+                                color: "#93c5fd"
+                                text: "󰑐"
+                                renderType: Text.QtRendering
+                            }
+
+                            MouseArea {
+                                id: castReloadMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.scanCastDevices()
+                            }
+                        }
+                    }
+
+                    // Discovered Displays List
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        visible: root.castDevices && root.castDevices.length > 0
+
+                        Repeater {
+                            model: root.castDevices
+
+                            Rectangle {
+                                id: devRow
+                                Layout.fillWidth: true
+                                implicitHeight: 56
+                                radius: 14
+
+                                readonly property bool isCurrent: root.castConnected && (modelData.connected || modelData.name === root.castConnectedDevice)
+
+                                color: isCurrent ? "#25007aff" : (devRowMouse.containsMouse ? "#24ffffff" : "#14ffffff")
+                                border.color: isCurrent ? "#8060a5fa" : (devRowMouse.containsMouse ? "#35ffffff" : "#18ffffff")
+                                border.width: 1
+
+                                scale: devRowMouse.pressed ? 0.98 : (devRowMouse.containsMouse ? 1.01 : 1.0)
+                                Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
+                                Behavior on color { ColorAnimation { duration: 150 } }
+                                Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 12
+                                    spacing: 12
+
+                                    Rectangle {
+                                        Layout.preferredWidth: 38
+                                        Layout.preferredHeight: 38
+                                        radius: 19
+                                        color: devRow.isCurrent ? "#007aff" : "#22ffffff"
+                                        Behavior on color { ColorAnimation { duration: 150 } }
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            font.family: root.iconFont
+                                            font.pixelSize: 20
+                                            color: "#ffffff"
+                                            text: modelData.type === "tv" ? "󰅐" : (modelData.type === "speaker" ? "󰓃" : "󰄗")
+                                            renderType: Text.QtRendering
+                                        }
+                                    }
+
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 2
+
+                                        Text {
+                                            text: modelData.name
+                                            font.family: root.sfFontMedium
+                                            font.pixelSize: 15
+                                            color: "#ffffff"
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                            renderType: Text.QtRendering
+                                        }
+
+                                        Text {
+                                            text: (modelData.model && modelData.model !== "" ? modelData.model + " • " : "") + modelData.protocol + " (" + modelData.ip + ")"
+                                            font.family: root.sfFont
+                                            font.pixelSize: 12
+                                            color: "#94a3b8"
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                            renderType: Text.QtRendering
+                                        }
+                                    }
+
+                                    // Action Button
+                                    Rectangle {
+                                        implicitWidth: devRow.isCurrent ? 74 : 64
+                                        implicitHeight: 30
+                                        radius: 15
+                                        color: devRow.isCurrent ? (actMouse.containsMouse ? "#dc2626" : "#ef4444") : (actMouse.containsMouse ? "#0062cc" : "#007aff")
+                                        Behavior on color { ColorAnimation { duration: 150 } }
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: devRow.isCurrent ? "Disconnect" : "Mirror"
+                                            font.family: root.sfFontMedium
+                                            font.pixelSize: 12
+                                            color: "#ffffff"
+                                            renderType: Text.QtRendering
+                                        }
+
+                                        MouseArea {
+                                            id: actMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                if (devRow.isCurrent) {
+                                                    root.disconnectCast()
+                                                } else {
+                                                    root.connectCast(modelData)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: devRowMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    z: -1
+                                    onClicked: {
+                                        if (devRow.isCurrent) {
+                                            root.disconnectCast()
+                                        } else {
+                                            root.connectCast(modelData)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Empty State: No Devices Found
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: emptyCol.implicitHeight + 24
+                        radius: 14
+                        color: "#12ffffff"
+                        border.color: "#18ffffff"
+                        border.width: 1
+                        visible: !root.castScanning && (!root.castDevices || root.castDevices.length === 0)
+
+                        ColumnLayout {
+                            id: emptyCol
+                            anchors.fill: parent
+                            anchors.margins: 16
+                            spacing: 8
+
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                font.family: root.iconFont
+                                font.pixelSize: 32
+                                color: "#50ffffff"
+                                text: "󰄗"
+                                renderType: Text.QtRendering
+                            }
+
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: "No Wireless Displays Found"
+                                font.family: root.sfFontMedium
+                                font.pixelSize: 14
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: "Make sure your Chromecast, Google TV, or AirPlay receiver is powered on and connected to the same Wi-Fi network."
+                                font.family: root.sfFont
+                                font.pixelSize: 12
+                                color: "#94a3b8"
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                                renderType: Text.QtRendering
+                            }
+
+                            Rectangle {
+                                Layout.alignment: Qt.AlignHCenter
+                                implicitWidth: 104
+                                implicitHeight: 30
+                                radius: 15
+                                color: emptyScanMouse.containsMouse ? "#0062cc" : "#007aff"
+                                Behavior on color { ColorAnimation { duration: 150 } }
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "Scan Again"
+                                    font.family: root.sfFontMedium
+                                    font.pixelSize: 12
+                                    color: "#ffffff"
+                                    renderType: Text.QtRendering
+                                }
+
+                                MouseArea {
+                                    id: emptyScanMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.scanCastDevices()
                                 }
                             }
                         }

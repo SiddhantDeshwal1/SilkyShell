@@ -97,8 +97,10 @@ Item {
             root.isSearching = false;
         } else {
             webSuggestProc.command = [
-                "/home/banana/.config/quickshell/scripts/web-suggest.py",
-                q
+                Paths.script("web-search.py"),
+                "suggest",
+                q,
+                "6"
             ];
             webSuggestProc.running = true;
         }
@@ -130,7 +132,7 @@ Item {
 
     function openQuery(q) {
         openProc.running = false;
-        openProc.command = ["/home/banana/.config/quickshell/scripts/web-open.sh", q];
+        openProc.command = [Paths.script("web-open.sh"), q];
         openProc.running = true;
         root.searchExecuted(q);
     }

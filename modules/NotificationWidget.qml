@@ -614,22 +614,9 @@ PanelWindow {
             // 2. If DND is active or Panel is open, don't show floating popup toast
             if (root.dndActive || root.panelOpen) return
 
-            // 2b. Phone notifications are displayed exclusively by Dynamic Island.
-            // They are preserved in Notification History above, but corner toast is suppressed to avoid duplicates.
-            const appLower = appName.toLowerCase()
-            const deskEntry = (notification.desktopEntry || "").toLowerCase()
-            const srcName = (sourceInfo.sourceName || "").toLowerCase()
-            const hints = notification.hints || {}
-            const isPhoneNotification = appLower.includes("kdeconnect") 
-                || deskEntry.includes("kdeconnect")
-                || srcName.includes("kdeconnect")
-                || (hints["x-kde-origin-name"] !== undefined)
-                || (hints["x-kdeconnect-device-id"] !== undefined)
-                || (hints["x-kdeconnect-id"] !== undefined)
-                || (hints["kdeconnect-id"] !== undefined)
-                || (hints["desktop-entry"] && String(hints["desktop-entry"]).toLowerCase().includes("kdeconnect"))
-
-            if (isPhoneNotification) return
+            // 2b. Phone notifications: previously suppressed for Dynamic Island.
+            // Commented out since Dynamic Island is unwired.
+            // if (isPhoneNotification) return
 
             // 3. Show floating toast for ONLY this newly arrived notification
             toastModel.append({
@@ -647,7 +634,7 @@ PanelWindow {
     }
 
     property bool clearingAll: false
-    property bool isPanelVisible: false
+    readonly property bool isPanelVisible: panelOpen || (historyContainer && historyContainer.opacity > 0.001)
     property bool openedWithEmptyHistory: false
 
     function togglePanel() {
@@ -656,31 +643,16 @@ PanelWindow {
     }
 
     function openPanel() {
-        hidePanelTimer.stop()
         if (root.controlCenter) {
             root.controlCenter.close()
         }
         root.openedWithEmptyHistory = (!root.groupList || root.groupList.length === 0)
         panelOpen = true
-        isPanelVisible = true
         toastModel.clear()
     }
 
     function closePanel() {
         panelOpen = false
-        hidePanelTimer.restart()
-    }
-
-    Timer {
-        id: hidePanelTimer
-        interval: root.openedWithEmptyHistory ? 440 : 200
-        repeat: false
-        onTriggered: {
-            if (!root.panelOpen) {
-                root.isPanelVisible = false
-                root.openedWithEmptyHistory = false
-            }
-        }
     }
 
     function clearAll() {
@@ -786,7 +758,7 @@ PanelWindow {
     color: "transparent"
     visible: root.isPanelVisible || root.hasActiveToasts
 
-    mask: root.isPanelVisible ? fullRegion : toastRegion
+    mask: (root.panelOpen || !root.hasActiveToasts) ? fullRegion : toastRegion
 
     Region {
         id: fullRegion
@@ -844,51 +816,34 @@ PanelWindow {
         implicitHeight: historyCol.implicitHeight
         height: Math.min(implicitHeight, Screen.height - 60)
 
-        // Fluid liquid spring transform: coordinated scale and translation
+        // Fluid liquid spring transform: coordinated scale and translation (matches Clear All on exit)
         transform: [
             Translate {
                 id: historyTrans
-                x: root.panelOpen ? 0 : 28
+                x: root.panelOpen ? 0 : 120
                 Behavior on x {
                     NumberAnimation {
-                        duration: root.panelOpen ? 520 : 380
-                        easing.type: root.panelOpen ? Easing.OutBack : Easing.InCubic
-                        easing.overshoot: 1.15
-                    }
-                }
-            },
-            Scale {
-                id: historyScale
-                origin.x: historyContainer.width
-                origin.y: 0
-                xScale: root.panelOpen ? 1.0 : 0.96
-                yScale: root.panelOpen ? 1.0 : 0.96
-                Behavior on xScale {
-                    NumberAnimation {
-                        duration: root.panelOpen ? 520 : 380
-                        easing.type: root.panelOpen ? Easing.OutBack : Easing.InCubic
-                        easing.overshoot: 1.15
-                    }
-                }
-                Behavior on yScale {
-                    NumberAnimation {
-                        duration: root.panelOpen ? 520 : 380
-                        easing.type: root.panelOpen ? Easing.OutBack : Easing.InCubic
+                        duration: root.panelOpen ? 450 : 240
+                        easing.type: root.panelOpen ? Easing.OutBack : Easing.OutCubic
                         easing.overshoot: 1.15
                     }
                 }
             }
         ]
-
         opacity: root.panelOpen ? 1.0 : 0.0
+        onOpacityChanged: {
+            if (opacity <= 0.001 && !root.panelOpen) {
+                root.openedWithEmptyHistory = false
+            }
+        }
         Behavior on opacity {
             NumberAnimation {
-                duration: root.panelOpen ? 420 : 300
-                easing.type: root.panelOpen ? Easing.OutCubic : Easing.InCubic
+                duration: root.panelOpen ? 380 : 240
+                easing.type: Easing.OutCubic
             }
         }
 
-        visible: root.isPanelVisible
+        visible: opacity > 0.001
 
         ColumnLayout {
             id: historyCol
@@ -951,48 +906,30 @@ PanelWindow {
             // Empty State Card (With Smooth Opening and Closing Animations)
             LiquidGlassCard {
                 id: emptyStateCard
-                visible: root.openedWithEmptyHistory && (!root.groupList || root.groupList.length === 0) && !root.clearingAll && root.isPanelVisible
+                enableWave: false
+                visible: root.openedWithEmptyHistory && (!root.groupList || root.groupList.length === 0) && !root.clearingAll && (historyContainer.opacity > 0.001)
                 Layout.fillWidth: true
                 implicitHeight: 82
                 cardRadius: 26
 
                 transform: [
-                    Translate {
-                        id: emptyTrans
-                        x: root.panelOpen ? 0 : 32
-                        y: root.panelOpen ? 0 : 12
-                        Behavior on x {
-                            NumberAnimation {
-                                duration: root.panelOpen ? 600 : 400
-                                easing.type: root.panelOpen ? Easing.OutBack : Easing.InCubic
-                                easing.overshoot: 1.15
-                            }
-                        }
-                        Behavior on y {
-                            NumberAnimation {
-                                duration: root.panelOpen ? 600 : 400
-                                easing.type: root.panelOpen ? Easing.OutBack : Easing.InCubic
-                                easing.overshoot: 1.15
-                            }
-                        }
-                    },
                     Scale {
                         id: emptyScale
                         origin.x: emptyStateCard.width / 2
                         origin.y: emptyStateCard.height / 2
-                        xScale: root.panelOpen ? 1.0 : 0.90
-                        yScale: root.panelOpen ? 1.0 : 0.90
+                        xScale: root.panelOpen ? 1.0 : 0.96
+                        yScale: root.panelOpen ? 1.0 : 0.96
                         Behavior on xScale {
                             NumberAnimation {
-                                duration: root.panelOpen ? 600 : 400
-                                easing.type: root.panelOpen ? Easing.OutBack : Easing.InCubic
+                                duration: root.panelOpen ? 450 : 240
+                                easing.type: root.panelOpen ? Easing.OutBack : Easing.OutCubic
                                 easing.overshoot: 1.15
                             }
                         }
                         Behavior on yScale {
                             NumberAnimation {
-                                duration: root.panelOpen ? 600 : 400
-                                easing.type: root.panelOpen ? Easing.OutBack : Easing.InCubic
+                                duration: root.panelOpen ? 450 : 240
+                                easing.type: root.panelOpen ? Easing.OutBack : Easing.OutCubic
                                 easing.overshoot: 1.15
                             }
                         }
@@ -1002,8 +939,8 @@ PanelWindow {
                 opacity: root.panelOpen ? 1.0 : 0.0
                 Behavior on opacity {
                     NumberAnimation {
-                        duration: root.panelOpen ? 450 : 320
-                        easing.type: root.panelOpen ? Easing.OutCubic : Easing.InCubic
+                        duration: root.panelOpen ? 380 : 240
+                        easing.type: Easing.OutCubic
                     }
                 }
 
@@ -1043,9 +980,8 @@ PanelWindow {
                 displaced: Transition {
                     NumberAnimation {
                         property: "y"
-                        duration: 560
-                        easing.type: Easing.BezierSpline
-                        easing.bezierCurve: [0.25, 1.08, 0.22, 1.0, 1.0, 1.0]
+                        duration: 230
+                        easing.type: Easing.OutCubic
                     }
                 }
 
@@ -1181,22 +1117,22 @@ PanelWindow {
                 onTriggered: toastCardItem.startDismiss()
             }
 
-            // Subtle, Buttery Smooth 60fps Left-to-Right Dismissal Animation
+            // Subtle, Buttery Smooth 60fps Left-to-Right Dismissal Animation (matches opening timing)
             SequentialAnimation {
                 id: exitAnim
                 ParallelAnimation {
                     NumberAnimation {
                         target: toastCardItem
                         property: "dragOffsetX"
-                        to: toastCardItem.width + 40
-                        duration: 260
+                        to: Math.max(100, toastCardItem.dragOffsetX + 100)
+                        duration: 320
                         easing.type: Easing.OutCubic
                     }
                     NumberAnimation {
                         target: toastCardItem
                         property: "exitOpacity"
                         to: 0.0
-                        duration: 240
+                        duration: 220
                         easing.type: Easing.OutQuad
                     }
                 }
@@ -1235,8 +1171,8 @@ PanelWindow {
 
             LiquidGlassCard {
                 id: toastCardRect
-                anchors.left: parent.left
-                anchors.right: parent.right
+                enableWave: false
+                width: parent.width
                 anchors.top: parent.top
                 implicitHeight: Math.min(Screen.height - 120, Math.max(76, tContentRow.implicitHeight + 24))
                 height: implicitHeight
@@ -1245,7 +1181,9 @@ PanelWindow {
                 idleColor: Theme.darkMode ? "#f0131c28" : "#f8ffffff"
                 isHovered: tCardMouse.containsMouse
 
-                x: toastCardItem.dragOffsetX
+                transform: Translate {
+                    x: toastCardItem.dragOffsetX
+                }
                 opacity: toastCardItem.exitOpacity
 
                 scale: (tCardMouse.pressed && !tCardMouse.isDragging)
@@ -1257,53 +1195,6 @@ PanelWindow {
                     NumberAnimation {
                         duration: 160
                         easing.type: Easing.OutCubic
-                    }
-                }
-
-                // Glossy specular shimmer light sweep on tile transition
-                Rectangle {
-                    id: shimmerFlare
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    width: 70
-                    radius: 26
-                    x: -width - 20
-                    opacity: 0.0
-                    gradient: Gradient {
-                        orientation: Gradient.Horizontal
-                        GradientStop { position: 0.0; color: "transparent" }
-                        GradientStop { position: 0.5; color: "#35ffffff" }
-                        GradientStop { position: 1.0; color: "transparent" }
-                    }
-                    transform: Rotation { origin.x: 35; origin.y: 40; angle: 18 }
-                }
-
-                SequentialAnimation {
-                    id: shimmerAnim
-                    ParallelAnimation {
-                        NumberAnimation {
-                            target: shimmerFlare
-                            property: "x"
-                            from: -80
-                            to: toastCardRect.width + 80
-                            duration: 400
-                            easing.type: Easing.OutCubic
-                        }
-                        SequentialAnimation {
-                            NumberAnimation { target: shimmerFlare; property: "opacity"; from: 0.0; to: 0.8; duration: 120 }
-                            NumberAnimation { target: shimmerFlare; property: "opacity"; to: 0.0; duration: 280 }
-                        }
-                    }
-                }
-
-                Component.onCompleted: {
-                    shimmerAnim.restart()
-                }
-
-                Connections {
-                    target: toastCardItem
-                    function onYChanged() {
-                        shimmerAnim.restart()
                     }
                 }
 

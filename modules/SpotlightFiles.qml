@@ -75,7 +75,7 @@ Item {
 
     Process {
         id: drivesProc
-        command: ["/home/banana/.config/quickshell/scripts/file-search.py", "drives"]
+        command: [Paths.script("file-search.py"), "drives"]
         stdout: SplitParser {
             onRead: function(line) {
                 try {
@@ -133,7 +133,7 @@ Item {
         if (q === "") {
             // Show recent documents
             fileListProc.command = [
-                "/home/banana/.config/quickshell/scripts/file-search.py",
+                Paths.script("file-search.py"),
                 "recent",
                 root.activeDrive,
                 "12"
@@ -141,7 +141,7 @@ Item {
         } else {
             // Search files via fd
             fileListProc.command = [
-                "/home/banana/.config/quickshell/scripts/file-search.py",
+                Paths.script("file-search.py"),
                 "search",
                 root.activeDrive,
                 q,
@@ -171,7 +171,7 @@ Item {
     function openItem(item, isTerminal) {
         let action = isTerminal ? "terminal" : "open";
         openProc.running = false;
-        openProc.command = ["/home/banana/.config/quickshell/scripts/file-open.sh", action, item.path];
+        openProc.command = [Paths.script("file-open.sh"), action, item.path];
         openProc.running = true;
         root.fileOpened(item.path);
     }
