@@ -35,4 +35,6 @@ ScreenshotWidget 1.0 ScreenshotWidget.qml
 NotificationGroupCard 1.0 NotificationGroupCard.qml
 LiquidGlassBackground 1.0 LiquidGlassBackground.qml
 ScreenRecordingBar 1.0 ScreenRecordingBar.qml
+ScreenShareBorder 1.0 ScreenShareBorder.qml
 AltTabDock 1.0 AltTabDock.qml
+AppleWifiIcon 1.0 AppleWifiIcon.qml

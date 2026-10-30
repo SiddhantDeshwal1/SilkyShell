@@ -67,7 +67,7 @@ def extract_colors(img_path):
     top_h = max(2, int(img.height * 0.18))
     top_slice = img.crop((0, 0, img.width, top_h))
 
-    pixels = [top_slice.getpixel((x, y)) for y in range(top_slice.height) for x in range(top_slice.width)]
+    pixels = list(top_slice.getdata())
     if not pixels:
         return "#0b0e1d", "#f0f3fa", "#42a6f7"
 

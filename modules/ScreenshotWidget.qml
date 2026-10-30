@@ -965,6 +965,18 @@ PanelWindow {
                     "text/plain": root.imagePath.replace(/^file:\/\//, "")
                 }
                 Drag.imageSource: root.imagePath
+
+                Drag.onDragFinished: function(dropAction) {
+                    if (dropAction !== Qt.IgnoreAction) {
+                        // Screenshot successfully dropped into target app -> auto-dismiss
+                        root.startDismiss()
+                    } else {
+                        // Drag canceled or dropped on invalid target -> resume countdown if not hovered
+                        if (!cardDragArea.containsMouse && !root.menuOpen) {
+                            root.resumeCountdown()
+                        }
+                    }
+                }
             }
 
             // ── MOUSE & DRAG INTERACTION AREA ────────────────────────────────
@@ -977,6 +989,14 @@ PanelWindow {
                 cursorShape: cardDragArea.drag.active ? Qt.ClosedHandCursor : Qt.PointingHandCursor
                 z: 20
 
+                drag.onActiveChanged: {
+                    if (!cardDragArea.drag.active) {
+                        if (!cardDragArea.containsMouse && !root.menuOpen) {
+                            root.resumeCountdown()
+                        }
+                    }
+                }
+
                 onEntered: {
                     root.isHovered = true
                     root.pauseCountdown()
@@ -985,6 +1005,12 @@ PanelWindow {
                 onExited: {
                     root.isHovered = false
                     if (!cardDragArea.drag.active && !root.menuOpen) {
+                        root.resumeCountdown()
+                    }
+                }
+
+                onReleased: function(mouse) {
+                    if (!cardDragArea.drag.active && !cardDragArea.containsMouse && !root.menuOpen) {
                         root.resumeCountdown()
                     }
                 }

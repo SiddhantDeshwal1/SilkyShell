@@ -171,19 +171,31 @@ def get_audio_devices():
 
 def select_area():
     import subprocess
+    import pty
     try:
-        res = subprocess.run([
-            "slurp",
-            "-d",
-            "-b", "#00000088",
-            "-c", "#ffffff",
-            "-s", "#00000000",
-            "-w", "2",
-            "-f", "%x,%y %wx%h"
-        ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60)
-        geom = res.stdout.strip()
-        if geom:
-            return {"success": True, "geometry": geom}
+        master, slave = pty.openpty()
+        try:
+            res = subprocess.run([
+                "slurp",
+                "-d",
+                "-b", "#00000088",
+                "-c", "#ffffff",
+                "-s", "#00000000",
+                "-w", "2",
+                "-f", "%x,%y %wx%h"
+            ], stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60)
+            geom = res.stdout.strip()
+            if geom:
+                return {"success": True, "geometry": geom}
+        finally:
+            try:
+                os.close(slave)
+            except OSError:
+                pass
+            try:
+                os.close(master)
+            except OSError:
+                pass
     except Exception as e:
         return {"success": False, "error": str(e)}
     return {"success": False, "geometry": ""}

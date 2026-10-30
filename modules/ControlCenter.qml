@@ -60,6 +60,7 @@ PanelWindow {
         refreshPowerMode()
         refreshDisplays()
         refreshMultiMixer()
+        refreshAudioEffects()
     }
 
     property string currentView: "main" // "main" | "wifi" | "bluetooth" | "sound" | "power" | "display"
@@ -262,9 +263,85 @@ PanelWindow {
 
     // ── Audio / Pipewire State ────────────────────────────────────────
     property var sink: Pipewire.defaultAudioSink
-    property var sinkAudio: sink ? sink.audio : null
+    property var sinkAudio: {
+        if (sink && sink.name && sink.name.indexOf("easyeffects") !== -1) {
+            const physicalSinks = root.getAudioOutputSinks()
+            if (physicalSinks.length > 0 && physicalSinks[0].audio) {
+                return physicalSinks[0].audio
+            }
+        }
+        return sink ? sink.audio : null
+    }
     property real volumeLevel: sinkAudio ? sinkAudio.volume : 0.5
     property bool isMuted: sinkAudio ? sinkAudio.muted : false
+
+    // ── Audio Effects (EasyEffects DSP) State ──────────────────────────
+    property bool audioEffectsEnabled: false
+    property string audioEffectsActivePreset: "Music Hi-Fi"
+    property string audioEffectsActiveDesc: "Audiophile balanced soundstage"
+    property var audioEffectsPresets: [
+        { id: "direct", name: "Direct Bypass", icon: "󰔊", desc: "Raw uncolored sound" },
+        { id: "vocal", name: "Vocal Clarity", icon: "󰍬", desc: "Meetings & calls speech clarity" },
+        { id: "music", name: "Music Hi-Fi", icon: "󰎆", desc: "Audiophile balanced soundstage" },
+        { id: "excited", name: "Excited Bass", icon: "󰝚", desc: "Club punch & high energy" },
+        { id: "movie", name: "Movie Cinema", icon: "󰿎", desc: "Dialogue leveler & spatial" },
+        { id: "auto", name: "Auto Adapt", icon: "󰓃", desc: "EBU R128 adaptive loudness" },
+        { id: "latenight", name: "Late Night Quiet", icon: "󰤄", desc: "No wall bass, quiet dialogue" },
+        { id: "gaming", name: "Gaming Footsteps", icon: "󰊴", desc: "Footsteps & positional cues" }
+    ]
+
+    function parseAudioEffectsJson(jsonStr) {
+        if (!jsonStr || !jsonStr.startsWith("{")) return
+        try {
+            var data = JSON.parse(jsonStr)
+            root.audioEffectsEnabled = !!data.enabled
+            if (data.active_preset) root.audioEffectsActivePreset = data.active_preset
+            if (data.active_desc) root.audioEffectsActiveDesc = data.active_desc
+            if (data.presets && Array.isArray(data.presets) && data.presets.length > 0) {
+                root.audioEffectsPresets = data.presets
+            }
+        } catch (e) {
+            console.warn("Failed to parse audio effects JSON:", e)
+        }
+    }
+
+    function refreshAudioEffects() {
+        if (!audioEffectsStateProc.running) {
+            audioEffectsStateProc.running = true
+        }
+    }
+
+    function setAudioEffectPreset(presetName) {
+        if (presetName === "Direct Bypass" || presetName === "direct") {
+            root.audioEffectsEnabled = false
+            root.audioEffectsActivePreset = "Direct Bypass"
+            root.audioEffectsActiveDesc = "Raw uncolored sound (DSP bypassed)"
+        } else {
+            root.audioEffectsEnabled = true
+            root.audioEffectsActivePreset = presetName
+            for (var i = 0; i < root.audioEffectsPresets.length; i++) {
+                if (root.audioEffectsPresets[i].name === presetName) {
+                    root.audioEffectsActiveDesc = root.audioEffectsPresets[i].desc
+                    break
+                }
+            }
+        }
+        audioEffectsActionProc.running = false
+        audioEffectsActionProc.command = ["python3", Paths.script("audio-effects.py"), "set-preset", presetName]
+        audioEffectsActionProc.running = true
+    }
+
+    function toggleAudioEffects() {
+        const nextState = !root.audioEffectsEnabled
+        root.audioEffectsEnabled = nextState
+        if (!nextState) {
+            root.audioEffectsActivePreset = "Direct Bypass"
+            root.audioEffectsActiveDesc = "Raw uncolored sound (DSP bypassed)"
+        }
+        audioEffectsActionProc.running = false
+        audioEffectsActionProc.command = ["python3", Paths.script("audio-effects.py"), "toggle-bypass"]
+        audioEffectsActionProc.running = true
+    }
 
     // ── Multi-Mixer State ─────────────────────────────────────────────
     property bool multiMixerEnabled: false
@@ -398,10 +475,10 @@ PanelWindow {
     function getAudioOutputSinks() {
         return Pipewire.nodes.values.filter(function(n) {
             if (!n || !n.isSink || n.isStream) return false
-            const name = n.name || ""
-            if (name === "qs_multi_mixer" || name === "qs_delayed_speaker") return false
-            const propName = (n.properties && n.properties["node.name"]) || ""
-            if (propName === "qs_multi_mixer" || propName === "qs_delayed_speaker") return false
+            const name = (n.name || "").toLowerCase()
+            if (name === "qs_multi_mixer" || name === "qs_delayed_speaker" || name.indexOf("easyeffects") !== -1) return false
+            const propName = ((n.properties && n.properties["node.name"]) || "").toLowerCase()
+            if (propName === "qs_multi_mixer" || propName === "qs_delayed_speaker" || propName.indexOf("easyeffects") !== -1) return false
             return true
         })
     }
@@ -531,6 +608,7 @@ PanelWindow {
         open = true
         currentView = "sound"
         root.refreshMultiMixer()
+        root.refreshAudioEffects()
         root.runShell("quickshell ipc call notifications close &")
     }
 
@@ -962,17 +1040,8 @@ PanelWindow {
     Process {
         id: brightStreamProc
         running: true
-        command: ["sh", "-c",
-            "for b in /sys/class/backlight/*; do " +
-            "  if [ -r \"$b/brightness\" ] && [ -r \"$b/max_brightness\" ]; then " +
-            "    cat \"$b/brightness\" \"$b/max_brightness\"; " +
-            "    while inotifywait -qq -e modify \"$b/brightness\"; do " +
-            "      cat \"$b/brightness\"; " +
-            "    done; " +
-            "    exit; " +
-            "  fi; " +
-            "done"
-        ]
+        stdinEnabled: true
+        command: ["python3", Paths.script("brightness-control.py"), "stream"]
         stdout: SplitParser {
             splitMarker: "\n"
             onRead: function(line) {
@@ -1143,6 +1212,72 @@ PanelWindow {
         running: root.open && root.currentView === "sound"
         repeat: true
         onTriggered: root.refreshMultiMixer()
+    }
+
+    // 5b. Audio Auto-Switch Backend Daemon (audio-autoswitch.py)
+    // Automatically routes audio to most recently connected Bluetooth / Wired Headphones / USB DAC
+    Process {
+        id: audioAutoSwitchProc
+        command: ["python3", Paths.script("audio-autoswitch.py"), "daemon"]
+        running: true
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) {
+                // Daemon emits JSON on device transitions
+            }
+        }
+        onExited: function() {
+            audioAutoSwitchRestartTimer.restart()
+        }
+    }
+
+    Timer {
+        id: audioAutoSwitchRestartTimer
+        interval: 1500
+        repeat: false
+        onTriggered: {
+            if (!audioAutoSwitchProc.running) audioAutoSwitchProc.running = true
+        }
+    }
+
+    // 5c. Audio Effects Backend (audio-effects.py)
+    Process {
+        id: audioEffectsStateProc
+        command: ["python3", Paths.script("audio-effects.py"), "status"]
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) {
+                root.parseAudioEffectsJson(line.trim())
+            }
+        }
+    }
+
+    Process {
+        id: audioEffectsActionProc
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) {
+                root.parseAudioEffectsJson(line.trim())
+            }
+        }
+        onExited: {
+            audioEffectsRefreshTimer.restart()
+        }
+    }
+
+    Timer {
+        id: audioEffectsRefreshTimer
+        interval: 150
+        repeat: false
+        onTriggered: root.refreshAudioEffects()
+    }
+
+    Timer {
+        id: audioEffectsPollTimer
+        interval: 4000
+        running: root.open && root.currentView === "sound"
+        repeat: true
+        onTriggered: root.refreshAudioEffects()
     }
 
     // 6. Screen Casting Backend (screencast-service.py)
@@ -1457,14 +1592,13 @@ PanelWindow {
                             scale: wifiBadgeMouse.pressed ? 0.92 : 1.0
                             Behavior on scale { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
 
-                            Text {
+                            AppleWifiIcon {
                                 anchors.centerIn: parent
-                                font.family: root.iconFont
-                                font.pixelSize: 24
-                                color: root.wifiEnabled ? "#007aff" : "#000000"
-                                text: root.wifiEnabled ? (root.wifiConnected ? "󰖩" : "󰤨") : "󰤮"
-                                renderType: Text.QtRendering
-                                Behavior on color { ColorAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                                size: 24
+                                variant: root.wifiEnabled ? "blue" : "grey"
+                                enabled: root.wifiEnabled
+                                connected: root.wifiConnected
+                                signal: root.wifiSignal > 0 ? root.wifiSignal : 100
                             }
 
                             MouseArea {
@@ -3884,13 +4018,13 @@ PanelWindow {
                                         radius: 14
                                         color: modelData.isActive ? "#007aff" : "#20ffffff"
 
-                                        Text {
+                                        AppleWifiIcon {
                                             anchors.centerIn: parent
-                                            font.family: root.iconFont
-                                            font.pixelSize: 16
-                                            color: "#ffffff"
-                                            text: modelData.signal > 75 ? "󰤨" : (modelData.signal > 45 ? "󰤥" : (modelData.signal > 20 ? "󰤢" : "󰤟"))
-                                            renderType: Text.QtRendering
+                                            size: 17
+                                            variant: "white"
+                                            signal: modelData.signal
+                                            connected: modelData.isActive
+                                            enabled: true
                                         }
                                     }
 
@@ -4865,6 +4999,230 @@ PanelWindow {
                 // Small gap below slider
                 Item { Layout.preferredHeight: 4 }
 
+                // ── Sound Effects & Audio Profiles Card ──────────────────
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: fxCol.implicitHeight + 18
+                    radius: 12
+                    color: root.audioEffectsEnabled ? "#22007aff" : "#12ffffff"
+                    border.color: root.audioEffectsEnabled ? "#7060a5fa" : "#18ffffff"
+                    border.width: 1
+                    clip: true
+
+                    Behavior on color { ColorAnimation { duration: 180 } }
+                    Behavior on border.color { ColorAnimation { duration: 180 } }
+                    Behavior on implicitHeight {
+                        NumberAnimation {
+                            duration: 280
+                            easing.type: Easing.BezierSpline
+                            easing.bezierCurve: root.springCurve
+                        }
+                    }
+
+                    ColumnLayout {
+                        id: fxCol
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        spacing: 8
+
+                        // Header: Icon + Title/Status + Master Switch
+                        RowLayout {
+                            id: fxHeaderRow
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            // Icon Badge (32x32)
+                            Rectangle {
+                                Layout.preferredWidth: 32
+                                Layout.preferredHeight: 32
+                                radius: 16
+                                color: root.audioEffectsEnabled ? "#007aff" : "#20ffffff"
+                                Behavior on color { ColorAnimation { duration: 160 } }
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    font.family: root.iconFont
+                                    font.pixelSize: 18
+                                    color: "#ffffff"
+                                    renderType: Text.QtRendering
+                                    text: "󰓃"
+                                }
+                            }
+
+                            // Title & Description
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 1
+
+                                Text {
+                                    text: "Sound Effects & Tuning"
+                                    font.family: root.sfFont
+                                    font.pixelSize: 15
+                                    font.bold: true
+                                    color: "#ffffff"
+                                    renderType: Text.QtRendering
+                                }
+
+                                Text {
+                                    text: root.audioEffectsEnabled ? (root.audioEffectsActivePreset + " • " + root.audioEffectsActiveDesc) : "Off (Direct Bypass)"
+                                    font.family: root.sfFontMedium
+                                    font.pixelSize: 12
+                                    color: root.audioEffectsEnabled ? "#93c5fd" : "#80ffffff"
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                    renderType: Text.QtRendering
+                                }
+                            }
+
+                            // Master Switch Pill (44x24)
+                            Rectangle {
+                                id: fxMasterPill
+                                Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                                Layout.preferredWidth: 44
+                                Layout.preferredHeight: 24
+                                radius: 12
+                                color: root.audioEffectsEnabled ? "#007aff" : "#3a3a3c"
+                                Behavior on color { ColorAnimation { duration: 160 } }
+
+                                Rectangle {
+                                    width: 20
+                                    height: 20
+                                    radius: 10
+                                    color: "#ffffff"
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    x: root.audioEffectsEnabled ? 22 : 2
+                                    Behavior on x { NumberAnimation { duration: 180; easing.type: Easing.OutBack; easing.overshoot: 1.25 } }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.toggleAudioEffects()
+                                }
+                            }
+                        }
+
+                        // Hairline Separator (visible only when expanded)
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 1
+                            color: "#18ffffff"
+                            visible: fxGridContainer.visible
+                            opacity: fxGridContainer.opacity
+                        }
+
+                        // Presets Grid Container (Smoothly expands/collapses)
+                        Item {
+                            id: fxGridContainer
+                            Layout.fillWidth: true
+                            clip: true
+                            implicitHeight: root.audioEffectsEnabled ? fxGrid.implicitHeight : 0
+                            opacity: root.audioEffectsEnabled ? 1.0 : 0.0
+                            visible: implicitHeight > 0.5 || opacity > 0.01
+
+                            Behavior on implicitHeight {
+                                NumberAnimation {
+                                    duration: 280
+                                    easing.type: Easing.BezierSpline
+                                    easing.bezierCurve: root.springCurve
+                                }
+                            }
+                            Behavior on opacity {
+                                NumberAnimation {
+                                    duration: 200
+                                    easing.type: Easing.OutQuad
+                                }
+                            }
+
+                            GridLayout {
+                                id: fxGrid
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                columns: 4
+                                rowSpacing: 6
+                                columnSpacing: 6
+
+                                Repeater {
+                                    model: root.audioEffectsPresets
+
+                                    delegate: Rectangle {
+                                        Layout.fillWidth: true
+                                        implicitHeight: 52
+                                        radius: 9
+
+                                        property bool isSelected: {
+                                            if (modelData.id === "direct" && !root.audioEffectsEnabled) return true
+                                            return root.audioEffectsEnabled && root.audioEffectsActivePreset === modelData.name
+                                        }
+
+                                        color: isSelected ? "#33007aff" : (presetMouse.containsMouse ? "#24ffffff" : "#14ffffff")
+                                        border.color: isSelected ? "#8060a5fa" : (presetMouse.containsMouse ? "#30ffffff" : "transparent")
+                                        border.width: 1
+
+                                        Behavior on color { ColorAnimation { duration: 120 } }
+                                        Behavior on border.color { ColorAnimation { duration: 120 } }
+
+                                        scale: presetMouse.pressed ? 0.95 : 1.0
+                                        Behavior on scale { NumberAnimation { duration: 100 } }
+
+                                        ColumnLayout {
+                                            anchors.centerIn: parent
+                                            spacing: 2
+
+                                            Text {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                font.family: root.iconFont
+                                                font.pixelSize: 20
+                                                color: isSelected ? "#60a5fa" : "#ffffff"
+                                                renderType: Text.QtRendering
+                                                text: modelData.icon || "󰓃"
+                                            }
+
+                                            Text {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                font.family: root.sfFontMedium
+                                                font.pixelSize: 12
+                                                font.bold: isSelected
+                                                color: isSelected ? "#ffffff" : "#cbd5e1"
+                                                renderType: Text.QtRendering
+                                                text: {
+                                                    if (modelData.id === "direct") return "Direct"
+                                                    if (modelData.id === "vocal") return "Vocal"
+                                                    if (modelData.id === "music") return "Music"
+                                                    if (modelData.id === "excited") return "Excited"
+                                                    if (modelData.id === "movie") return "Movie"
+                                                    if (modelData.id === "auto") return "Auto"
+                                                    if (modelData.id === "latenight") return "Night"
+                                                    if (modelData.id === "gaming") return "Gaming"
+                                                    return modelData.name
+                                                }
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            id: presetMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                if (modelData.id === "direct") {
+                                                    root.setAudioEffectPreset("Direct Bypass")
+                                                } else {
+                                                    root.setAudioEffectPreset(modelData.name)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Small gap below effects card
+                Item { Layout.preferredHeight: 4 }
+
                 // ── Multi-Mixer Toggle Row ────────────────────────────
                 Rectangle {
                     Layout.fillWidth: true
@@ -5107,7 +5465,13 @@ PanelWindow {
                                             return root.multiMixerSlaves && root.multiMixerSlaves.includes(modelData.name)
                                         }
                                         const def = Pipewire.defaultAudioSink
-                                        return def !== null && def !== undefined && def.id === modelData.id
+                                        if (!def) return false
+                                        if (def.id === modelData.id) return true
+                                        if (def.name && def.name.indexOf("easyeffects") !== -1) {
+                                            const physicalSinks = root.getAudioOutputSinks()
+                                            return physicalSinks.length > 0 && physicalSinks[0].id === modelData.id
+                                        }
+                                        return false
                                     }
 
                                     property bool isVolumeAdjusting: root.multiMixerEnabled && root.multiMixerVolumeDevice === modelData.name

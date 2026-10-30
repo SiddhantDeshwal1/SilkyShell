@@ -24,6 +24,8 @@ Item {
     readonly property int lowBatteryThreshold: 25
     property bool initialized: false
     property bool lastOnBattery: UPower.onBattery
+    property double lastAlertTimestamp: 0
+    property int lastAlertPct: -1
 
     // ── Audio Feedback (Zero Process Spawning) ─────────────────────────
     SoundEffect {
@@ -39,28 +41,39 @@ Item {
     }
 
     // ── Low Battery Notification Dispatcher ───────────────────────────
-    function triggerLowBatteryAlert() {
+    function triggerLowBatteryAlert(force) {
         if (!root.batteryReady || root.charging || root.batteryPct <= 0) return
-        if (root.batteryPct < root.lowBatteryThreshold) {
-            lowBatterySound.play()
-            Quickshell.execDetached([
-                "notify-send",
-                "-u", "normal",
-                "-t", "10000",
-                "-i", "battery-low",
-                "Low Battery",
-                "Battery level is " + Math.round(root.batteryPct) + "%. Plug in the charger!"
-            ])
+        if (root.batteryPct >= root.lowBatteryThreshold) return
+
+        const now = Date.now()
+        // Enforce strict cooldown: prevent duplicate/overlapping notifications (minimum 60s cooldown)
+        if (!force && (now - root.lastAlertTimestamp < 60000)) {
+            return
         }
+
+        root.lastAlertTimestamp = now
+        root.lastAlertPct = root.batteryPct
+
+        lowBatterySound.play()
+        Quickshell.execDetached([
+            "notify-send",
+            "-a", "Battery",
+            "-u", "normal",
+            "-t", "8000",
+            "-i", "battery-low",
+            "-h", "string:x-canonical-private-synchronous:battery-low",
+            "Low Battery",
+            "Battery level is " + Math.round(root.batteryPct) + "%. Plug in the charger!"
+        ])
     }
 
-    // Periodic Low Battery check (every 60s while low and discharging, mirroring battery.sh)
+    // Periodic Low Battery reminder (every 120s while low and discharging)
     Timer {
         id: lowBatteryTimer
-        interval: 60000
+        interval: 120000
         repeat: true
         running: root.batteryReady && !root.charging && root.batteryPct < root.lowBatteryThreshold
-        onTriggered: root.triggerLowBatteryAlert()
+        onTriggered: root.triggerLowBatteryAlert(true)
     }
 
     // Charger Connection & Disconnection Event Watcher
@@ -69,24 +82,28 @@ Item {
         function onOnBatteryChanged() {
             if (!root.initialized) return
 
-            // Transition from on-battery (true) to charging (false) -> Play charger chime
+            // Transition from on-battery (true) to charging (false) -> Play charger chime & reset alert tracker
             if (root.lastOnBattery && !UPower.onBattery) {
                 chargingSound.play()
+                root.lastAlertPct = -1
             }
             root.lastOnBattery = UPower.onBattery
 
-            // If disconnected and immediately low, trigger check
+            // If disconnected and immediately low, trigger check with cooldown guard
             if (UPower.onBattery && root.batteryPct < root.lowBatteryThreshold) {
-                root.triggerLowBatteryAlert()
+                root.triggerLowBatteryAlert(false)
             }
         }
     }
 
-    // Battery Percentage drop watcher
+    // Battery Percentage drop watcher — triggers only on milestone thresholds (e.g. 20%, 15%, 10%, 5%)
     onBatteryPctChanged: {
-        if (!root.initialized) return
-        if (!root.charging && root.batteryPct < root.lowBatteryThreshold) {
-            root.triggerLowBatteryAlert()
+        if (!root.initialized || root.charging) return
+        if (root.batteryPct < root.lowBatteryThreshold) {
+            const isMilestone = (root.batteryPct === 20 || root.batteryPct === 15 || root.batteryPct === 10 || root.batteryPct <= 5)
+            if (isMilestone && root.batteryPct !== root.lastAlertPct) {
+                root.triggerLowBatteryAlert(false)
+            }
         }
     }
 
@@ -101,9 +118,9 @@ Item {
         repeat: false
         onTriggered: {
             root.initialized = true
-            // Check once after initial startup if battery is low
+            // Check once after initial startup if battery is low (respecting cooldown)
             if (!root.charging && root.batteryPct > 0 && root.batteryPct < root.lowBatteryThreshold) {
-                root.triggerLowBatteryAlert()
+                root.triggerLowBatteryAlert(false)
             }
         }
     }

@@ -4,6 +4,9 @@
 # quickshell screenshot helper — Ultra-Low Latency Pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Clean up temporary screenshot files older than 60 minutes
+find /tmp -maxdepth 1 -name 'qs_screenshot_*.png' -mmin +60 -delete 2>/dev/null || true
+
 timestamp=$(date +'%Y-%m-%d_%H-%M-%S')
 mode="${1:---area}"
 geom=""
@@ -12,6 +15,14 @@ Y=0
 W=1920
 H=1080
 autoSaved="false"
+
+run_slurp() {
+    if [ -t 0 ]; then
+        slurp "$@"
+    else
+        script -q -c "slurp $(printf '%q ' "$@")" /dev/null 2>/dev/null | tr -d '\r' | head -n 1
+    fi
+}
 
 case "$mode" in
     --now|--full)
@@ -24,14 +35,7 @@ case "$mode" in
         mon_name=""
         if command -v hyprctl &>/dev/null; then
             if command -v jq &>/dev/null; then
-                focused_mon=$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.focused == true)')
-                if [ -n "$focused_mon" ]; then
-                    mon_name=$(echo "$focused_mon" | jq -r '.name')
-                    X=$(echo "$focused_mon" | jq -r '.x')
-                    Y=$(echo "$focused_mon" | jq -r '.y')
-                    W=$(echo "$focused_mon" | jq -r '.width')
-                    H=$(echo "$focused_mon" | jq -r '.height')
-                fi
+                IFS=$'\t' read -r mon_name X Y W H < <(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.focused == true) | "\(.name)\t\(.x)\t\(.y)\t\(.width)\t\(.height)"' 2>/dev/null)
             fi
             if [ -z "$mon_name" ]; then
                 mon_info=$(hyprctl monitors -j 2>/dev/null | grep -E '"(width|height)"' | head -n 2 | awk -F': ' '{print $2}' | tr -d ',')
@@ -54,20 +58,28 @@ case "$mode" in
         autoSaved="false"
 
         if command -v hyprctl &>/dev/null; then
-            active_win=$(hyprctl activewindow -j 2>/dev/null)
-            if [ -n "$active_win" ]; then
-                at=$(echo "$active_win" | grep -o '"at": \[[^]]*\]' | tr -d '[]"at: ')
-                size=$(echo "$active_win" | grep -o '"size": \[[^]]*\]' | tr -d '[]"size: ')
-                X=$(echo "$at" | cut -d',' -f1)
-                Y=$(echo "$at" | cut -d',' -f2)
-                W=$(echo "$size" | cut -d',' -f1)
-                H=$(echo "$size" | cut -d',' -f2)
-                geom="${X},${Y} ${W}x${H}"
-                grim -g "$geom" "$filename"
+            if command -v jq &>/dev/null; then
+                IFS=$'\t' read -r X Y W H < <(hyprctl activewindow -j 2>/dev/null | jq -r '"\(.at[0])\t\(.at[1])\t\(.size[0])\t\(.size[1])"' 2>/dev/null)
+                if [ -n "$X" ] && [ -n "$W" ] && [ "$W" -gt 0 ]; then
+                    geom="${X},${Y} ${W}x${H}"
+                    grim -g "$geom" "$filename"
+                fi
+            else
+                active_win=$(hyprctl activewindow -j 2>/dev/null)
+                if [ -n "$active_win" ]; then
+                    at=$(echo "$active_win" | grep -o '"at": \[[^]]*\]' | tr -d '[]"at: ')
+                    size=$(echo "$active_win" | grep -o '"size": \[[^]]*\]' | tr -d '[]"size: ')
+                    X=$(echo "$at" | cut -d',' -f1)
+                    Y=$(echo "$at" | cut -d',' -f2)
+                    W=$(echo "$size" | cut -d',' -f1)
+                    H=$(echo "$size" | cut -d',' -f2)
+                    geom="${X},${Y} ${W}x${H}"
+                    grim -g "$geom" "$filename"
+                fi
             fi
         fi
         if [ ! -f "$filename" ]; then
-            geom=$(slurp)
+            geom=$(run_slurp)
             [ -z "$geom" ] && exit 0
             if [[ "$geom" =~ ([0-9]+),([0-9]+)[[:space:]]+([0-9]+)x([0-9]+) ]]; then
                 X="${BASH_REMATCH[1]}"
@@ -80,7 +92,7 @@ case "$mode" in
         ;;
     *)
         # Default: Region selection with slurp — cached to /tmp
-        geom=$(slurp)
+        geom=$(run_slurp)
         [ -z "$geom" ] && exit 0
 
         filename="/tmp/qs_screenshot_${timestamp}.png"

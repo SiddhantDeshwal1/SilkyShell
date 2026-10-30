@@ -182,18 +182,26 @@ Item {
     }
 
     // ── Cava data ─────────────────────────────────────────────────────
+    readonly property bool needsCava: (root.playerState === "playing" && (root.currentPhase === "visualizer" || (typeof mediaMenu !== 'undefined' && mediaMenu && mediaMenu.open)))
     property var cavaBars: new Array(16).fill(0)
+
+    onNeedsCavaChanged: {
+        if (!root.needsCava) {
+            root.cavaBars = new Array(16).fill(0)
+        }
+    }
 
     Process {
         id: cavaProc
-        running: true
+        running: root.needsCava
         command: ["cava", "-p", Paths.script("cava-island.ini")]
         onExited: function(code, status) {
-            cavaRestartTimer.restart()
+            if (root.needsCava) cavaRestartTimer.restart()
         }
         stdout: SplitParser {
             // Each line: "123;456;789;...;\n"  — 16 values separated by ;
             onRead: function(line) {
+                if (!root.needsCava) return
                 const raw = line.trim()
                 if (!raw) return
                 const parts = raw.split(";")
@@ -210,7 +218,7 @@ Item {
         interval: 1000
         repeat: false
         onTriggered: {
-            if (!cavaProc.running) cavaProc.running = true
+            if (root.needsCava && !cavaProc.running) cavaProc.running = true
         }
     }
 

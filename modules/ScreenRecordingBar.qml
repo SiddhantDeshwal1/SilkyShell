@@ -368,7 +368,16 @@ PanelWindow {
         }
     }
 
-    Process { id: snipRunner }
+    Process {
+        id: snipRunner
+        onExited: function(exitCode, exitStatus) {
+            // Safety fallback: if IPC was missed or snip was cancelled, guarantee toolbar restores
+            if (root.isSelectingSnip) {
+                root.isSelectingSnip = false
+                root.barOpen = true
+            }
+        }
+    }
 
     function triggerSnipSelection() {
         root.optionsOpen = false

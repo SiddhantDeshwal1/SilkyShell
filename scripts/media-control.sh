@@ -13,53 +13,25 @@ fi
 
 case "$ACTION" in
     next)
-        if [ -n "$PLAYER" ]; then
-            playerctl "${P_FLAG[@]}" next 2>/dev/null || true
-        else
-            playerctl next 2>/dev/null || true
-        fi
+        playerctl "${P_FLAG[@]}" next 2>/dev/null || true
         ;;
     prev|previous)
-        if [ -n "$PLAYER" ]; then
-            playerctl "${P_FLAG[@]}" previous 2>/dev/null || true
-        else
-            playerctl previous 2>/dev/null || true
-        fi
+        playerctl "${P_FLAG[@]}" previous 2>/dev/null || true
         ;;
     play-pause|toggle)
-        if [ -n "$PLAYER" ]; then
-            playerctl "${P_FLAG[@]}" play-pause 2>/dev/null || true
-        else
-            playerctl play-pause 2>/dev/null || true
-        fi
+        playerctl "${P_FLAG[@]}" play-pause 2>/dev/null || true
         ;;
     play)
-        if [ -n "$PLAYER" ]; then
-            playerctl "${P_FLAG[@]}" play 2>/dev/null || true
-        else
-            playerctl play 2>/dev/null || true
-        fi
+        playerctl "${P_FLAG[@]}" play 2>/dev/null || true
         ;;
     pause)
-        if [ -n "$PLAYER" ]; then
-            playerctl "${P_FLAG[@]}" pause 2>/dev/null || true
-        else
-            playerctl pause 2>/dev/null || true
-        fi
+        playerctl "${P_FLAG[@]}" pause 2>/dev/null || true
         ;;
     set-volume)
-        if [ -n "$PLAYER" ]; then
-            playerctl "${P_FLAG[@]}" volume "$VALUE" 2>/dev/null || true
-        else
-            playerctl volume "$VALUE" 2>/dev/null || true
-        fi
+        playerctl "${P_FLAG[@]}" volume "$VALUE" 2>/dev/null || true
         ;;
     set-position)
-        if [ -n "$PLAYER" ]; then
-            playerctl "${P_FLAG[@]}" position "$VALUE" 2>/dev/null || true
-        else
-            playerctl position "$VALUE" 2>/dev/null || true
-        fi
+        playerctl "${P_FLAG[@]}" position "$VALUE" 2>/dev/null || true
         ;;
     get-info)
         STATUS=$(playerctl "${P_FLAG[@]}" status 2>/dev/null || true)

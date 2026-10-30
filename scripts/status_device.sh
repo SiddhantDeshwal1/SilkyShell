@@ -46,6 +46,18 @@ check_mic() {
 }
 
 check_camera() {
+    local dir
+    dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -f "$dir/camera-service.py" ]]; then
+        local active
+        active=$(python3 "$dir/camera-service.py" get 2>/dev/null | jq -r '.active' 2>/dev/null)
+        if [[ "$active" == "true" ]]; then
+            return 0
+        elif [[ "$active" == "false" ]]; then
+            return 1
+        fi
+    fi
+
     shopt -s nullglob
     local devices=(/dev/video*)
     for dev in "${devices[@]}"; do

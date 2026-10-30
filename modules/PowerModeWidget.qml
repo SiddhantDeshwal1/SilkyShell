@@ -31,8 +31,8 @@ LiquidGlassCard {
     signal clicked()
     signal modeChanged(string newMode)
 
-    isHovered: cardMouse.containsMouse || chevMouse.containsMouse
-    isPressed: cardMouse.pressed
+    isHovered: cardMouse.containsMouse || chevMouse.containsMouse || iconBadgeMouse.containsMouse
+    isPressed: cardMouse.pressed || iconBadgeMouse.pressed
 
     readonly property string sfFont: "SF Pro Rounded"
     readonly property string iconFont: "JetBrainsMono NFP"
@@ -50,11 +50,9 @@ LiquidGlassCard {
     property int    levelIndex: 1 // 0: Eco, 1: Bal, 2: Boost, 3: Perf, 4: Peak
     property bool   pendingCommit: debounceTimer.running || committingGuardTimer.running
 
-    isActive: true
+    isActive: false
+    idleColor: Theme.cardIdleColor
     activeColor: {
-        if (Theme.darkMode) {
-            return "#000000";
-        }
         switch (currentMode) {
             case "peak":         return Qt.rgba(0.96, 0.25, 0.38, 0.28);
             case "performance":  return Qt.rgba(0.98, 0.45, 0.09, 0.26);
@@ -150,6 +148,7 @@ LiquidGlassCard {
 
     // ── Main Layout: Icon + Mode Title & Wattage + Submenu Chevron ────
     RowLayout {
+        z: 1
         anchors.fill: parent
         anchors.leftMargin: 14
         anchors.rightMargin: 12
@@ -160,23 +159,27 @@ LiquidGlassCard {
         // 1. High-Tech Vector Icon Badge (44x44)
         Rectangle {
             id: iconBadge
+            z: 10
             Layout.alignment: Qt.AlignVCenter
             Layout.preferredWidth: 44
             Layout.preferredHeight: 44
             radius: 22
-            color: Qt.rgba(root.modeColor.r, root.modeColor.g, root.modeColor.b, 0.22)
+            color: iconBadgeMouse.containsMouse
+                ? Qt.rgba(root.modeColor.r, root.modeColor.g, root.modeColor.b, 0.35)
+                : Qt.rgba(root.modeColor.r, root.modeColor.g, root.modeColor.b, 0.22)
             border.color: Qt.rgba(root.modeColor.r, root.modeColor.g, root.modeColor.b, 0.55)
             border.width: 1.2
-            scale: 1.0
+            scale: iconBadgeMouse.pressed ? 0.92 : 1.0
 
             Behavior on color { ColorAnimation { duration: 240; easing.type: Easing.OutCubic } }
             Behavior on border.color { ColorAnimation { duration: 240; easing.type: Easing.OutCubic } }
+            Behavior on scale { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
 
             // 60fps Native GPU Scale Pulse Animation
             SequentialAnimation {
                 id: iconPulseAnim
-                NumberAnimation { target: iconBadge; property: "scale"; to: 1.15; duration: 110; easing.type: Easing.OutCubic }
-                NumberAnimation { target: iconBadge; property: "scale"; to: 1.0; duration: 180; easing.type: Easing.OutBack; easing.overshoot: 1.2 }
+                NumberAnimation { target: glyphText; property: "scale"; to: 1.25; duration: 110; easing.type: Easing.OutCubic }
+                NumberAnimation { target: glyphText; property: "scale"; to: 1.0; duration: 180; easing.type: Easing.OutBack; easing.overshoot: 1.2 }
             }
 
             Text {
@@ -189,6 +192,14 @@ LiquidGlassCard {
                 renderType: Text.QtRendering
 
                 Behavior on color { ColorAnimation { duration: 240; easing.type: Easing.OutCubic } }
+            }
+
+            MouseArea {
+                id: iconBadgeMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.clicked()
             }
         }
 
@@ -311,9 +322,10 @@ LiquidGlassCard {
         }
     }
 
-    // ── Main Card Mouse Area (Left-Click: Cycle, Right-Click: Submenu)
+    // ── Main Card Mouse Area (Left-Click: Submenu, Right-Click: Cycle)
     MouseArea {
         id: cardMouse
+        z: -1
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.RightButton
@@ -322,9 +334,9 @@ LiquidGlassCard {
         onClicked: (mouse) => {
             root.setClickPos(mouse.x, mouse.y)
             if (mouse.button === Qt.RightButton) {
-                root.clicked()
-            } else {
                 root.cycleNext()
+            } else {
+                root.clicked()
             }
         }
     }

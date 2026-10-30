@@ -30,16 +30,44 @@ RowLayout {
     spacing: 3
 
     property bool micActive: false
-    property bool cameraActive: false
+    property bool pipewireCameraActive: false
+    property bool v4l2CameraActive: false
+    property bool cameraActive: pipewireCameraActive || v4l2CameraActive
+    property var v4l2CameraApps: []
     property bool screenshareActive: false
     property bool screenRecordingActive: false
-    property bool v4l2CameraActive: false
-    property bool pipewireCameraActive: false
+
+    // ── V4L2 Camera Tracking (Chrome, Meet, Firefox, Zoom, Discord, etc.) ────
+    Process {
+        id: camServiceProc
+        command: ["python3", Paths.script("camera-service.py"), "daemon"]
+        running: true
+        stdout: SplitParser {
+            onRead: function(line) {
+                try {
+                    const data = JSON.parse(line.trim())
+                    root.v4l2CameraActive = !!data.active
+                    root.v4l2CameraApps = data.apps || []
+                } catch (e) {}
+            }
+        }
+    }
 
     IpcHandler {
         target: "statusdevices"
         function setRecording(active: bool) {
             root.screenRecordingActive = !!active
+        }
+        function getStatus(): string {
+            return JSON.stringify({
+                mic: root.micActive,
+                camera: root.cameraActive,
+                v4l2Camera: root.v4l2CameraActive,
+                pwCamera: root.pipewireCameraActive,
+                screen: root.screenshareActive,
+                recording: root.screenRecordingActive,
+                v4l2Apps: root.v4l2CameraApps
+            })
         }
     }
 
@@ -168,14 +196,14 @@ RowLayout {
                                        mediaName.includes("webrtc-consume-stream") ||
                                        (target && portalIds.includes(parseInt(target)))
 
-                if (isPortalStream || hasPortalSource) {
+                if (isPortalStream) {
                     screen = true
                 } else {
                     pwCamera = true
                 }
             } else if (mediaClass === "Video/Source") {
                 const isPortal = /xdph|portal|hyprland|screencast/i.test(nodeName)
-                if (isPortal) {
+                if (isPortal && mediaName.includes("xdph-streaming")) {
                     screen = true
                 }
             }
@@ -183,7 +211,6 @@ RowLayout {
 
         root.micActive = mic
         root.pipewireCameraActive = pwCamera
-        root.cameraActive = pwCamera
         root.screenshareActive = screen
     }
 
@@ -204,6 +231,7 @@ RowLayout {
     // Floating rich device settings panel (mic / camera / screen tabs).
     DeviceDropdown {
         id: deviceDropdown
+        v4l2CameraApps: root.v4l2CameraApps
     }
 
     // ──────────────────────────────────────────────────────────────────────

@@ -347,12 +347,10 @@ def run_daemon():
         except Exception as e:
             sys.stderr.write(f"[PowerService] DBus login1 listener error: {e}\n")
 
-        loop = GLib.MainLoop()
         loop.run()
     except Exception as e:
-        sys.stderr.write(f"[PowerService] Falling back to polling loop: {e}\n")
-        while True:
-            time.sleep(10)
+        sys.stderr.write(f"[PowerService] Daemon error: {e}\n")
+        sys.exit(1)
 
 if __name__ == "__main__":
     action = sys.argv[1] if len(sys.argv) > 1 else "get"

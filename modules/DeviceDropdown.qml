@@ -41,6 +41,7 @@ PanelWindow {
 
     // 0 = mic, 1 = camera, 2 = screen
     property int activeTab: 0
+    property var v4l2CameraApps: []
 
     anchors {
         top: true
@@ -171,6 +172,7 @@ PanelWindow {
     // application.name (mirrors the audio "apps using mic" row).
     function videoAppName(n) {
         if (!n) return "App"
+        if (n.isV4l2 && n.name) return n.name
         const p = n.properties || {}
         return p["application.name"]
             || p["media.name"]
@@ -210,9 +212,26 @@ PanelWindow {
     }
 
     function getCameraApps() {
-        return root.getVideoAppStreams().filter(function(n) {
+        const pwApps = root.getVideoAppStreams().filter(function(n) {
             return !root.isScreenShareStream(n)
         })
+        const combined = pwApps.slice()
+        if (root.v4l2CameraApps && root.v4l2CameraApps.length > 0) {
+            for (let i = 0; i < root.v4l2CameraApps.length; i++) {
+                const va = root.v4l2CameraApps[i]
+                const exists = pwApps.some(p => root.videoAppName(p).toLowerCase() === (va.name || "").toLowerCase())
+                if (!exists) {
+                    combined.push({
+                        id: va.pid,
+                        name: va.name || va.comm || "Camera App",
+                        isV4l2: true,
+                        pid: va.pid,
+                        device: va.device
+                    })
+                }
+            }
+        }
+        return combined
     }
 
     function getScreenShares() {
@@ -1133,7 +1152,13 @@ PanelWindow {
                                         anchors.fill: parent
                                         hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor
-                                        onClicked: root.runCmd(["pw-cli", "destroy", String(modelData.id)])
+                                        onClicked: {
+                                            if (modelData.isV4l2) {
+                                                root.runCmd(["kill", "-TERM", String(modelData.pid)])
+                                            } else {
+                                                root.runCmd(["pw-cli", "destroy", String(modelData.id)])
+                                            }
+                                        }
                                     }
                                 }
                             }

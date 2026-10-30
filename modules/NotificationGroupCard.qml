@@ -39,6 +39,12 @@ Item {
     signal dismissGroup(string groupKey)
 
     property bool isExpanded: false
+    property bool panelOpen: false
+    onPanelOpenChanged: {
+        if (!panelOpen) {
+            root.isExpanded = false
+        }
+    }
     onCountChanged: {
         if (root.count <= 1) root.isExpanded = false
     }

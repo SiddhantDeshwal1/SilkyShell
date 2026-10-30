@@ -48,9 +48,19 @@ fi
 
 GPU_FILE="/sys/class/drm/card1/device/gpu_busy_percent"
 
+trap 'exit 0' SIGTERM SIGINT SIGHUP
+
 while true; do
-    head -1 /proc/stat
-    grep -E '^Mem(Total|Available):' /proc/meminfo
+    read -r stat_line < /proc/stat
+    printf '%s\n' "$stat_line"
+
+    while read -r key val rest; do
+        case "$key" in
+            MemTotal:|MemAvailable:)
+                printf '%s %s kB\n' "$key" "$val"
+                ;;
+        esac
+    done < /proc/meminfo
 
     if [ -f "$GPU_FILE" ]; then
         printf 'G:%s\n' "$(< "$GPU_FILE")"

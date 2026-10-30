@@ -405,6 +405,8 @@ class UnifiedTelephonyService:
             })
         elif event == "missedCall":
             self.missed_calls.append({"caller": contact, "number": number, "time": time.time()})
+            if len(self.missed_calls) > 50:
+                self.missed_calls.pop(0)
             self.call_state = {
                 "active": False,
                 "state": "idle",
@@ -717,7 +719,6 @@ class UnifiedTelephonyService:
         def file_ipc_worker():
             cmd_file = "/tmp/quickshell-dynamic-island-cmd"
             while True:
-                time.sleep(0.2)
                 if os.path.exists(cmd_file):
                     try:
                         with open(cmd_file, "r") as f:
@@ -727,6 +728,9 @@ class UnifiedTelephonyService:
                             handle_command(l)
                     except Exception:
                         pass
+                    time.sleep(0.1)
+                else:
+                    time.sleep(1.0)
 
         t1 = threading.Thread(target=stdin_worker, daemon=True)
         t1.start()
@@ -735,6 +739,11 @@ class UnifiedTelephonyService:
 
     def run(self):
         self.log("Unified Telephony Service daemon running...")
+        try:
+            signal.signal(signal.SIGINT, lambda *_: self.loop.quit())
+            signal.signal(signal.SIGTERM, lambda *_: self.loop.quit())
+        except Exception:
+            pass
         try:
             self.loop.run()
         except (KeyboardInterrupt, SystemExit):

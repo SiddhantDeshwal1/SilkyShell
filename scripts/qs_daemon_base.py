@@ -169,4 +169,10 @@ class QSDaemonBase:
 
     def on_shutdown(self, bus):
         """Called on SIGTERM/SIGINT/HUP. Override for cleanup."""
-        pass
+        if self.lock_file:
+            try:
+                fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
+                self.lock_file.close()
+                self.lock_file = None
+            except Exception:
+                pass

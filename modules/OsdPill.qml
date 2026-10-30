@@ -199,7 +199,8 @@ Rectangle {
     // The first two lines are current/max brightness; later lines are updates.
     Process {
         running: true
-        command: ["sh", "-c", "for b in /sys/class/backlight/*; do if [ -r \"$b/brightness\" ] && [ -r \"$b/max_brightness\" ]; then cat \"$b/brightness\" \"$b/max_brightness\"; while inotifywait -qq -e modify \"$b/brightness\"; do cat \"$b/brightness\"; done; exit; fi; done"]
+        stdinEnabled: true
+        command: ["python3", Paths.script("brightness-control.py"), "stream"]
 
         stdout: SplitParser {
             onRead: function(data) {

@@ -619,6 +619,15 @@ PanelWindow {
             // if (isPhoneNotification) return
 
             // 3. Show floating toast for ONLY this newly arrived notification
+            // Deduplicate: If an active toast with the same summary already exists (e.g. "Low Battery"),
+            // remove the older one so only 1 notification is ever visible at a time.
+            for (let t = toastModel.count - 1; t >= 0; t--) {
+                const item = toastModel.get(t)
+                if (item && item.title === summary) {
+                    toastModel.remove(t)
+                }
+            }
+
             toastModel.append({
                 notifId:    id,
                 title:      summary,
@@ -649,6 +658,9 @@ PanelWindow {
         root.openedWithEmptyHistory = (!root.groupList || root.groupList.length === 0)
         panelOpen = true
         toastModel.clear()
+        if (historyListView) {
+            historyListView.positionViewAtBeginning()
+        }
     }
 
     function closePanel() {
@@ -1002,6 +1014,7 @@ PanelWindow {
                 delegate: NotificationGroupCard {
                     id: groupDelegate
                     width: historyListView.width
+                    panelOpen: root.panelOpen
                     groupKey: modelData.groupKey || ""
                     appName: modelData.app || "Notification"
                     iconSource: modelData.iconSource || ""

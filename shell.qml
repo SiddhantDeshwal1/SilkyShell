@@ -8,5 +8,6 @@ ShellRoot {
     Spotlight {}
     ScreenshotWidget {}
     ScreenRecordingBar {}
+    ScreenShareBorder {}
     AltTabDock {}
 }
