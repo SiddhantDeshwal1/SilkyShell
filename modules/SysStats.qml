@@ -90,7 +90,8 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         font.family: "SF Pro Rounded"
         font.pixelSize: 17
-        font.bold: false
+        font.weight: Font.Medium
+        renderType: Text.NativeRendering
         color: "#fe8019"
         text: "C:" + root.cpuUsage + "  M:" + (root.memUsedGb ? root.memUsedGb.toFixed(1) : "0.0") + "  " + root.gpuText + "  " + root.powerText + "  " + root.tempText
     }

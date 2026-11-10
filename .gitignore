@@ -15,6 +15,7 @@ node_modules/
 .idea/
 *.swp
 *~
+*.bak
 
 # Third-party reference projects
 extra/

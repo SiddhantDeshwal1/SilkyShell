@@ -19,8 +19,9 @@ MediaMenu 1.0 MediaMenu.qml
 MediaPlaybackWidget 1.0 MediaPlaybackWidget.qml
 NotificationWidget 1.0 NotificationWidget.qml
 OsdPill 1.0 OsdPill.qml
-ScreenTimeWidget 1.0 ScreenTimeWidget.qml
 PowerModeWidget 1.0 PowerModeWidget.qml
+TimerWidget 1.0 TimerWidget.qml
+TimerBarPreview 1.0 TimerBarPreview.qml
 StatusDevices 1.0 StatusDevices.qml
 SysStats 1.0 SysStats.qml
 Workspaces 1.0 Workspaces.qml
@@ -38,3 +39,5 @@ ScreenRecordingBar 1.0 ScreenRecordingBar.qml
 ScreenShareBorder 1.0 ScreenShareBorder.qml
 AltTabDock 1.0 AltTabDock.qml
 AppleWifiIcon 1.0 AppleWifiIcon.qml
+WallpaperPicker 1.0 WallpaperPicker.qml
+WallpaperFx 1.0 WallpaperFx.qml

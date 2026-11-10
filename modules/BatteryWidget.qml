@@ -139,7 +139,7 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         font.family: "SF Pro Rounded"
         font.pixelSize: 17
-        font.bold: false
+        font.weight: Font.Medium
         renderType: Text.NativeRendering
         color: root.batteryColor
         text: {

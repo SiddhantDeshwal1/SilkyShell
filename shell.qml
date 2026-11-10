@@ -10,4 +10,6 @@ ShellRoot {
     ScreenRecordingBar {}
     ScreenShareBorder {}
     AltTabDock {}
+    WallpaperPicker {}
+    WallpaperFx {}
 }

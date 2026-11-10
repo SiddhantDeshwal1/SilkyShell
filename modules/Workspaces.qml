@@ -115,8 +115,9 @@ Item {
                     anchors.centerIn: parent
                     font.family: "SF Pro Rounded"
                     font.pixelSize: 17
-                    font.bold: false
-                    color: modelData.focused ? "#282828" : (hoverHandler.hovered ? "#ebdbb2" : "#928374")
+                    font.weight: Font.Medium
+                    renderType: Text.NativeRendering
+                    color: modelData.focused ? "#282828" : (hoverHandler.hovered ? "#ffffff" : "#c5b69d")
                     text: modelData.name
 
                     Behavior on color {

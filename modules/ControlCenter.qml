@@ -63,10 +63,104 @@ PanelWindow {
         refreshAudioEffects()
     }
 
-    property string currentView: "main" // "main" | "wifi" | "bluetooth" | "sound" | "power" | "display"
+    property string currentView: "main" // "main" | "wifi" | "bluetooth" | "sound" | "power" | "display" | "cast" | "timer"
     property bool dndActive: false
     property bool darkModeActive: Theme.darkMode
     property bool nightLightActive: false
+
+    // ── Timer & Stopwatch State ───────────────────────────────────────
+    property string timerMode: "timer"      // "timer" | "stopwatch"
+    property bool   timerRunning: false
+    property int    timerSeconds: 0
+    property int    timerDuration: 0
+    property int    timerOvertime: 0
+    property bool   timerOvertimeActive: false
+    property bool   timerIsSet: false
+    property string timerDisplay: "Timer"
+
+    function parseTimerJson(jsonStr) {
+        if (!jsonStr || !jsonStr.startsWith("{")) return
+        try {
+            const data = JSON.parse(jsonStr)
+            if (data) {
+                root.timerMode = data.mode || "timer"
+                root.timerRunning = !!data.running
+                root.timerSeconds = data.seconds || 0
+                root.timerDuration = data.duration || 0
+                root.timerOvertime = data.overtime || 0
+                root.timerOvertimeActive = !!data.is_overtime
+                root.timerIsSet = !!data.is_set
+                root.timerDisplay = data.display || "Timer"
+            }
+        } catch (e) {}
+    }
+
+    // Timer streaming daemon process (runs continuously)
+    Process {
+        id: timerStreamProc
+        command: ["python3", Paths.script("timer-service.py"), "daemon"]
+        running: true
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) { root.parseTimerJson(line.trim()) }
+        }
+        onExited: timerStreamRestartTimer.restart()
+    }
+
+    Timer {
+        id: timerStreamRestartTimer
+        interval: 1000
+        repeat: false
+        onTriggered: {
+            if (!timerStreamProc.running) timerStreamProc.running = true
+        }
+    }
+
+    // Timer action command process (one-shot actions)
+    Process {
+        id: timerActionProc
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) { root.parseTimerJson(line.trim()) }
+        }
+    }
+
+    function timerToggle() {
+        timerActionProc.command = ["python3", Paths.script("timer-service.py"), "toggle"]
+        timerActionProc.running = true
+    }
+
+    function timerReset() {
+        timerActionProc.command = ["python3", Paths.script("timer-service.py"), "reset"]
+        timerActionProc.running = true
+    }
+
+    function timerSet(sec) {
+        timerActionProc.command = ["python3", Paths.script("timer-service.py"), "start-timer", sec.toString()]
+        timerActionProc.running = true
+    }
+
+    function timerSetStopwatch() {
+        timerActionProc.command = ["python3", Paths.script("timer-service.py"), "start-stopwatch"]
+        timerActionProc.running = true
+    }
+
+    // Repeating notification when timer expires (immediate + every 60s until stopped)
+    onTimerOvertimeActiveChanged: {
+        if (timerOvertimeActive) {
+            root.runShell("notify-send -u critical '⏰ Timer Up!' 'Your timer has finished.' &")
+        }
+    }
+
+    Timer {
+        id: timerNotifRepeatTimer
+        interval: 60000
+        repeat: true
+        running: root.timerOvertimeActive
+        onTriggered: {
+            root.runShell("notify-send -u critical '⏰ Timer Up!' 'Your timer has finished.' &")
+        }
+    }
 
     // ── Power Mode State ──────────────────────────────────────────────
     // ── Power Mode State ──────────────────────────────────────────────
@@ -525,10 +619,12 @@ PanelWindow {
         function setMultiMixerVolumeDevice(dev: string) { root.multiMixerVolumeDevice = dev }
         function toggleMultiMixerDevice(dev: string) { root.toggleMultiMixerSink(dev) }
         function openPower() { root.open = true; root.openPowerMenu() }
-        function openScreenTime() { root.open = true; root.openPowerMenu() }
         function setPowerMode(m: string) { root.setPowerMode(m) }
         function openDisplay() { root.open = true; root.openDisplayMenu() }
         function openCast() { root.open = true; root.openCastMenu() }
+        function openTimer() { root.open = true; root.openTimerMenu() }
+        function timerToggle() { root.timerToggle() }
+        function timerReset() { root.timerReset() }
         function goBack() { root.goBack() }
         function getActivePowerMode() { return root.powerActiveMode }
         function getActivePowerWattage() { return root.powerWattage }
@@ -621,10 +717,6 @@ PanelWindow {
         root.runShell("quickshell ipc call notifications close &")
     }
 
-    function openScreenTimeMenu() {
-        openPowerMenu()
-    }
-
     function openDisplayMenu() {
         if (currentView === "bluetooth") stopBluetoothScan()
         displayProfilesExpanded = false
@@ -642,6 +734,14 @@ PanelWindow {
         open = true
         currentView = "cast"
         scanCastDevices()
+        root.runShell("quickshell ipc call notifications close &")
+    }
+
+    function openTimerMenu() {
+        if (currentView === "bluetooth") stopBluetoothScan()
+        root.setupMenuOrigin(timerMenuCard, timerCard, 97, 240, 0.511, 0.184, 190)
+        open = true
+        currentView = "timer"
         root.runShell("quickshell ipc call notifications close &")
     }
 
@@ -1390,9 +1490,10 @@ PanelWindow {
             if (root.currentView === "wifi") return wifiMenuCard.height
             if (root.currentView === "bluetooth") return btMenuCard.height
             if (root.currentView === "sound") return soundMenuCard.height
-            if (root.currentView === "screentime" || root.currentView === "power") return powerMenuCard.height
+            if (root.currentView === "power") return powerMenuCard.height
             if (root.currentView === "display") return displayMenuCard.height
             if (root.currentView === "cast") return castMenuCard.height
+            if (root.currentView === "timer") return timerMenuCard.height
             return mainLayout.implicitHeight
         }
         height: implicitHeight
@@ -3033,6 +3134,7 @@ PanelWindow {
                 // 4.1 Left: 2x2 Circle Action Matrix (Lock, Snip, Record, Cast)
                 ColumnLayout {
                     Layout.preferredWidth: 182
+                    Layout.alignment: Qt.AlignTop
                     spacing: 12
 
                     // Row 4.1.1: Lock & Snip
@@ -3470,7 +3572,12 @@ PanelWindow {
                     }
                 }
 
-                // 4.2 Right: Power Mode Widget (182x70)
+                // 4.2 Right: Power Mode Widget (182x70) & Timer Widget (182x70)
+                ColumnLayout {
+                    Layout.preferredWidth: 182
+                    Layout.alignment: Qt.AlignTop
+                    spacing: 20
+
                     PowerModeWidget {
                         id: pwrCard
                         Layout.preferredWidth: 182
@@ -3546,6 +3653,92 @@ PanelWindow {
                             }
                         ]
                     }
+
+                    TimerWidget {
+                        id: timerCard
+                        Layout.preferredWidth: 182
+                        Layout.preferredHeight: 70
+                        Layout.alignment: Qt.AlignTop
+                        timerMode: root.timerMode
+                        timerRunning: root.timerRunning
+                        timerSeconds: root.timerSeconds
+                        timerDuration: root.timerDuration
+                        timerOvertime: root.timerOvertime
+                        timerOvertimeActive: root.timerOvertimeActive
+                        timerIsSet: root.timerIsSet
+                        timerDisplay: root.timerDisplay
+
+                        onToggleRequested: root.timerToggle()
+                        onMenuRequested: root.openTimerMenu()
+                        onResetRequested: root.timerReset()
+
+                        transform: [
+                            Scale {
+                                id: timerScale
+                                origin.x: timerCard.width / 2
+                                origin.y: timerCard.height / 2
+                                xScale: 0.75
+                                yScale: 0.75
+                            },
+                            Translate {
+                                id: timerTrans
+                                y: -20
+                            }
+                        ]
+                        opacity: 0.0
+
+                        state: root.open ? "open" : "closed"
+                        states: [
+                            State {
+                                name: "open"
+                                PropertyChanges { target: timerScale; xScale: 1.0; yScale: 1.0 }
+                                PropertyChanges { target: timerTrans; y: 0 }
+                                PropertyChanges { target: timerCard; opacity: 1.0 }
+                            },
+                            State {
+                                name: "closed"
+                                PropertyChanges { target: timerScale; xScale: 0.75; yScale: 0.75 }
+                                PropertyChanges { target: timerTrans; y: -20 }
+                                PropertyChanges { target: timerCard; opacity: 0.0 }
+                            }
+                        ]
+                        transitions: [
+                            Transition {
+                                from: "closed"; to: "open"
+                                SequentialAnimation {
+                                    PropertyAction { target: timerTrans; property: "y"; value: -20 }
+                                    PropertyAction { target: timerScale; property: "xScale"; value: 0.75 }
+                                    PropertyAction { target: timerScale; property: "yScale"; value: 0.75 }
+                                    PropertyAction { target: timerCard; property: "opacity"; value: 1.0 }
+                                    PauseAnimation { duration: 70 }
+                                    ParallelAnimation {
+                                        NumberAnimation { target: timerTrans; property: "y"; to: 0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: timerScale; property: "xScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: timerScale; property: "yScale"; to: 1.0; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                    }
+                                }
+                            },
+                            Transition {
+                                from: "open"; to: "closed"
+                                SequentialAnimation {
+                                    PauseAnimation { duration: 38 }
+                                    ParallelAnimation {
+                                        NumberAnimation { target: timerTrans; property: "y"; to: -20; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: timerScale; property: "xScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        NumberAnimation { target: timerScale; property: "yScale"; to: 0.75; duration: 540; easing.type: Easing.BezierSpline; easing.bezierCurve: root.springCurve }
+                                        SequentialAnimation {
+                                            PauseAnimation { duration: 250 }
+                                            NumberAnimation { target: timerCard; property: "opacity"; to: 0.0; duration: 290; easing.type: Easing.OutQuad }
+                                        }
+                                    }
+                                    PropertyAction { target: timerTrans; property: "y"; value: -20 }
+                                    PropertyAction { target: timerScale; property: "xScale"; value: 0.75 }
+                                    PropertyAction { target: timerScale; property: "yScale"; value: 0.75 }
+                                }
+                            }
+                        ]
+                    }
+                }
 
 
             }
@@ -5760,7 +5953,7 @@ PanelWindow {
             states: [
                 State {
                     name: "open"
-                    when: root.currentView === "power" || root.currentView === "screentime"
+                    when: root.currentView === "power"
                     PropertyChanges {
                         target: powerMenuCard
                         opacity: 1.0
@@ -5774,7 +5967,7 @@ PanelWindow {
                 },
                 State {
                     name: "closed"
-                    when: root.currentView !== "power" && root.currentView !== "screentime"
+                    when: root.currentView !== "power"
                     PropertyChanges {
                         target: powerMenuCard
                         opacity: 0.0
@@ -7820,6 +8013,803 @@ PanelWindow {
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: root.scanCastDevices()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // VIEW 8: macOS STYLE TIMER & STOPWATCH SUB-MENU
+        // ══════════════════════════════════════════════════════════════
+        LiquidGlassCard {
+            id: timerMenuCard
+            width: 376
+            height: Math.min(Screen.height - 60, timerMenuCol.implicitHeight + 28)
+            cardRadius: dynamicRadius
+            clip: true
+
+            // Pop out and merge back into originating timerCard widget
+            property real startTransX: 97
+            property real startTransY: 240
+            property real startScaleX: 0.511
+            property real startScaleY: 0.184
+            property real startRadius: 190
+
+            property real contentScaleX: startScaleX
+            property real contentScaleY: startScaleY
+            property real contentTransX: startTransX
+            property real contentTransY: startTransY
+            property real dynamicRadius: startRadius
+            property real contentOpacity: 0.0
+
+            property string subMode: root.timerMode // "timer" | "stopwatch"
+            property int selectedPreset: 600 // 10m default
+            property bool isCustom: false
+            property string customInputText: ""
+
+            opacity: 0.0
+            visible: opacity > 0.001
+
+            Component.onCompleted: root.setupMenuOrigin(timerMenuCard, timerCard, 97, 240, 0.511, 0.184, 190)
+
+            transform: [
+                Scale {
+                    origin.x: timerMenuCard.width / 2
+                    origin.y: timerMenuCard.height / 2
+                    xScale: timerMenuCard.contentScaleX
+                    yScale: timerMenuCard.contentScaleY
+                },
+                Translate {
+                    x: timerMenuCard.contentTransX
+                    y: timerMenuCard.contentTransY
+                }
+            ]
+
+            states: [
+                State {
+                    name: "open"
+                    when: root.currentView === "timer"
+                    PropertyChanges {
+                        target: timerMenuCard
+                        opacity: 1.0
+                        contentScaleX: 1.0
+                        contentScaleY: 1.0
+                        contentTransX: 0
+                        contentTransY: 0
+                        dynamicRadius: 28
+                        contentOpacity: 1.0
+                    }
+                },
+                State {
+                    name: "closed"
+                    when: root.currentView !== "timer"
+                    PropertyChanges {
+                        target: timerMenuCard
+                        opacity: 0.0
+                        contentScaleX: timerMenuCard.startScaleX
+                        contentScaleY: timerMenuCard.startScaleY
+                        contentTransX: timerMenuCard.startTransX
+                        contentTransY: timerMenuCard.startTransY
+                        dynamicRadius: timerMenuCard.startRadius
+                        contentOpacity: 0.0
+                    }
+                }
+            ]
+
+            transitions: [
+                Transition {
+                    from: "closed"; to: "open"
+                    ParallelAnimation {
+                        NumberAnimation {
+                            target: timerMenuCard; property: "opacity"
+                            duration: 110; easing.type: Easing.OutQuad
+                        }
+                        SequentialAnimation {
+                            PauseAnimation { duration: 60 }
+                            NumberAnimation {
+                                target: timerMenuCard; property: "contentOpacity"
+                                duration: 240; easing.type: Easing.OutQuad
+                            }
+                        }
+                        NumberAnimation {
+                            target: timerMenuCard
+                            properties: "contentScaleX,contentScaleY,contentTransX,contentTransY,dynamicRadius"
+                            duration: 540
+                            easing.type: Easing.BezierSpline
+                            easing.bezierCurve: root.springCurve
+                        }
+                    }
+                },
+                Transition {
+                    from: "open"; to: "closed"
+                    ParallelAnimation {
+                        NumberAnimation {
+                            target: timerMenuCard; property: "contentOpacity"
+                            to: 0.0
+                            duration: 110; easing.type: Easing.OutQuad
+                        }
+                        SequentialAnimation {
+                            PauseAnimation { duration: 320 }
+                            NumberAnimation {
+                                target: timerMenuCard; property: "opacity"
+                                to: 0.0
+                                duration: 180; easing.type: Easing.OutQuad
+                            }
+                        }
+                        NumberAnimation {
+                            target: timerMenuCard
+                            properties: "contentScaleX,contentScaleY,contentTransX,contentTransY,dynamicRadius"
+                            duration: 500
+                            easing.type: Easing.BezierSpline
+                            easing.bezierCurve: root.springCurve
+                        }
+                    }
+                }
+            ]
+
+            function parseCustomSeconds(txt) {
+                if (!txt) return 600
+                txt = txt.trim()
+                if (txt.indexOf(":") !== -1) {
+                    var parts = txt.split(":")
+                    if (parts.length === 2) {
+                        return (parseInt(parts[0]) || 0) * 60 + (parseInt(parts[1]) || 0)
+                    } else if (parts.length === 3) {
+                        return (parseInt(parts[0]) || 0) * 3600 + (parseInt(parts[1]) || 0) * 60 + (parseInt(parts[2]) || 0)
+                    }
+                }
+                var m = parseInt(txt)
+                return isNaN(m) ? 600 : m * 60
+            }
+
+            ColumnLayout {
+                id: timerMenuCol
+                opacity: timerMenuCard.contentOpacity
+                anchors.fill: parent
+                anchors.margins: 14
+                spacing: 12
+
+                // 1. Header: Back + Title + Live Status Badge
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    Rectangle {
+                        Layout.preferredWidth: 34
+                        Layout.preferredHeight: 34
+                        radius: 17
+                        color: backTimerMouse.containsMouse ? "#30ffffff" : "transparent"
+
+                        Text {
+                            anchors.centerIn: parent
+                            font.family: root.iconFont
+                            font.pixelSize: 20
+                            color: "#ffffff"
+                            text: "󰁍"
+                            renderType: Text.QtRendering
+                        }
+
+                        MouseArea {
+                            id: backTimerMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.goBack()
+                        }
+                    }
+
+                    Text {
+                        text: "Timer & Stopwatch"
+                        font.family: root.sfFont
+                        font.pixelSize: 20
+                        color: "#ffffff"
+                        renderType: Text.QtRendering
+                        Layout.fillWidth: true
+                    }
+
+                    // Live Status Badge
+                    Rectangle {
+                        implicitWidth: statusText.implicitWidth + 14
+                        implicitHeight: 24
+                        radius: 12
+                        color: {
+                            if (root.timerOvertimeActive) return Qt.rgba(0.96, 0.25, 0.38, 0.25)
+                            if (root.timerRunning) return Qt.rgba(0.06, 0.72, 0.51, 0.22)
+                            return "#20ffffff"
+                        }
+                        border.color: {
+                            if (root.timerOvertimeActive) return "#f43f5e"
+                            if (root.timerRunning) return "#10b981"
+                            return "#40ffffff"
+                        }
+                        border.width: 1
+
+                        Text {
+                            id: statusText
+                            anchors.centerIn: parent
+                            text: {
+                                if (root.timerOvertimeActive) return "Time Up!"
+                                if (root.timerRunning) return "Running"
+                                if (root.timerIsSet) return "Paused"
+                                return "Ready"
+                            }
+                            font.family: root.sfFontMedium
+                            font.pixelSize: 11
+                            color: {
+                                if (root.timerOvertimeActive) return "#f43f5e"
+                                if (root.timerRunning) return "#10b981"
+                                return "#94a3b8"
+                            }
+                            renderType: Text.QtRendering
+                        }
+                    }
+                }
+
+                // Hairline Separator
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 1
+                    color: "#20ffffff"
+                }
+
+                // 2. Mode Selector Pills (Timer vs Stopwatch)
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 34
+                        radius: 10
+                        color: timerMenuCard.subMode === "timer" ? "#007aff" : (tModeMouse.containsMouse ? "#20ffffff" : "#10ffffff")
+                        border.color: timerMenuCard.subMode === "timer" ? "#60007aff" : "transparent"
+                        border.width: 1
+
+                        Behavior on color { ColorAnimation { duration: 140 } }
+
+                        RowLayout {
+                            anchors.centerIn: parent
+                            spacing: 6
+                            Text {
+                                text: "󰔞"
+                                font.family: root.iconFont
+                                font.pixelSize: 15
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+                            Text {
+                                text: "Timer"
+                                font.family: root.sfFontSemibold
+                                font.pixelSize: 14
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+                        }
+
+                        MouseArea {
+                            id: tModeMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                timerMenuCard.subMode = "timer"
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 34
+                        radius: 10
+                        color: timerMenuCard.subMode === "stopwatch" ? "#007aff" : (swModeMouse.containsMouse ? "#20ffffff" : "#10ffffff")
+                        border.color: timerMenuCard.subMode === "stopwatch" ? "#60007aff" : "transparent"
+                        border.width: 1
+
+                        Behavior on color { ColorAnimation { duration: 140 } }
+
+                        RowLayout {
+                            anchors.centerIn: parent
+                            spacing: 6
+                            Text {
+                                text: "󰔚"
+                                font.family: root.iconFont
+                                font.pixelSize: 15
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+                            Text {
+                                text: "Stopwatch"
+                                font.family: root.sfFontSemibold
+                                font.pixelSize: 14
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+                        }
+
+                        MouseArea {
+                            id: swModeMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                timerMenuCard.subMode = "stopwatch"
+                            }
+                        }
+                    }
+                }
+
+                // 3. Central Content: Timer Mode vs Stopwatch Mode
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    visible: timerMenuCard.subMode === "timer"
+
+                    // Live Time Display in Submenu
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 70
+                        radius: 14
+                        color: root.timerOvertimeActive
+                            ? Qt.rgba(0.96, 0.25, 0.38, 0.18)
+                            : (root.timerRunning ? Qt.rgba(0.06, 0.72, 0.51, 0.15) : "#15ffffff")
+                        border.color: root.timerOvertimeActive
+                            ? Qt.rgba(0.96, 0.25, 0.38, 0.50)
+                            : (root.timerRunning ? Qt.rgba(0.06, 0.72, 0.51, 0.45) : "#20ffffff")
+                        border.width: 1
+
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            spacing: 2
+
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: root.timerIsSet ? root.timerDisplay : (timerMenuCard.isCustom ? (timerMenuCard.customInputText !== "" ? timerMenuCard.customInputText : "Custom") : (timerMenuCard.selectedPreset / 60) + ":00")
+                                font.family: root.sfFont
+                                font.pixelSize: 28
+                                font.bold: true
+                                color: root.timerOvertimeActive ? "#f43f5e" : (root.timerRunning ? "#ffffff" : "#cbd5e1")
+                                renderType: Text.QtRendering
+                            }
+
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: root.timerOvertimeActive ? "Overtime Counting Up" : (root.timerRunning ? "Timer Running" : "Select a duration below")
+                                font.family: root.sfFont
+                                font.pixelSize: 11
+                                color: root.timerOvertimeActive ? "#f43f5e" : "#94a3b8"
+                                renderType: Text.QtRendering
+                            }
+                        }
+                    }
+
+                    // Presets Label
+                    Text {
+                        text: "PRESET TIMERS"
+                        font.family: root.sfFontSemibold
+                        font.pixelSize: 12
+                        color: "#93c5fd"
+                        renderType: Text.QtRendering
+                    }
+
+                    // Presets Grid: 2 rows of 3 pills
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 3
+                        rowSpacing: 8
+                        columnSpacing: 8
+
+                        // 5 min
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 34
+                            radius: 8
+                            property bool isCurrent: !timerMenuCard.isCustom && timerMenuCard.selectedPreset === 300
+                            color: isCurrent ? "#007aff" : (p5Mouse.containsMouse ? "#25ffffff" : "#15ffffff")
+                            border.color: isCurrent ? "#80007aff" : "transparent"
+                            border.width: 1
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "5 min"
+                                font.family: root.sfFontMedium
+                                font.pixelSize: 13
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+                            MouseArea {
+                                id: p5Mouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    timerMenuCard.isCustom = false
+                                    timerMenuCard.selectedPreset = 300
+                                }
+                            }
+                        }
+
+                        // 10 min
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 34
+                            radius: 8
+                            property bool isCurrent: !timerMenuCard.isCustom && timerMenuCard.selectedPreset === 600
+                            color: isCurrent ? "#007aff" : (p10Mouse.containsMouse ? "#25ffffff" : "#15ffffff")
+                            border.color: isCurrent ? "#80007aff" : "transparent"
+                            border.width: 1
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "10 min"
+                                font.family: root.sfFontMedium
+                                font.pixelSize: 13
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+                            MouseArea {
+                                id: p10Mouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    timerMenuCard.isCustom = false
+                                    timerMenuCard.selectedPreset = 600
+                                }
+                            }
+                        }
+
+                        // 25 min (Pomodoro)
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 34
+                            radius: 8
+                            property bool isCurrent: !timerMenuCard.isCustom && timerMenuCard.selectedPreset === 1500
+                            color: isCurrent ? "#007aff" : (p25Mouse.containsMouse ? "#25ffffff" : "#15ffffff")
+                            border.color: isCurrent ? "#80007aff" : "transparent"
+                            border.width: 1
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "25 min"
+                                font.family: root.sfFontMedium
+                                font.pixelSize: 13
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+                            MouseArea {
+                                id: p25Mouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    timerMenuCard.isCustom = false
+                                    timerMenuCard.selectedPreset = 1500
+                                }
+                            }
+                        }
+
+                        // 30 min
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 34
+                            radius: 8
+                            property bool isCurrent: !timerMenuCard.isCustom && timerMenuCard.selectedPreset === 1800
+                            color: isCurrent ? "#007aff" : (p30Mouse.containsMouse ? "#25ffffff" : "#15ffffff")
+                            border.color: isCurrent ? "#80007aff" : "transparent"
+                            border.width: 1
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "30 min"
+                                font.family: root.sfFontMedium
+                                font.pixelSize: 13
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+                            MouseArea {
+                                id: p30Mouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    timerMenuCard.isCustom = false
+                                    timerMenuCard.selectedPreset = 1800
+                                }
+                            }
+                        }
+
+                        // 45 min
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 34
+                            radius: 8
+                            property bool isCurrent: !timerMenuCard.isCustom && timerMenuCard.selectedPreset === 2700
+                            color: isCurrent ? "#007aff" : (p45Mouse.containsMouse ? "#25ffffff" : "#15ffffff")
+                            border.color: isCurrent ? "#80007aff" : "transparent"
+                            border.width: 1
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "45 min"
+                                font.family: root.sfFontMedium
+                                font.pixelSize: 13
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+                            MouseArea {
+                                id: p45Mouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    timerMenuCard.isCustom = false
+                                    timerMenuCard.selectedPreset = 2700
+                                }
+                            }
+                        }
+
+                        // Custom
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 34
+                            radius: 8
+                            property bool isCurrent: timerMenuCard.isCustom
+                            color: isCurrent ? "#007aff" : (pCustMouse.containsMouse ? "#25ffffff" : "#15ffffff")
+                            border.color: isCurrent ? "#80007aff" : "transparent"
+                            border.width: 1
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "Custom…"
+                                font.family: root.sfFontMedium
+                                font.pixelSize: 13
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+                            MouseArea {
+                                id: pCustMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    timerMenuCard.isCustom = true
+                                    customInputField.forceActiveFocus()
+                                }
+                            }
+                        }
+                    }
+
+                    // Custom Input Box (visible when Custom is selected)
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: timerMenuCard.isCustom ? 38 : 0
+                        visible: timerMenuCard.isCustom
+                        radius: 8
+                        color: "#25000000"
+                        border.color: customInputField.activeFocus ? "#007aff" : "#40ffffff"
+                        border.width: 1
+                        clip: true
+
+                        Behavior on Layout.preferredHeight { NumberAnimation { duration: 180 } }
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+                            spacing: 8
+
+                            Text {
+                                text: "󰅒"
+                                font.family: root.iconFont
+                                font.pixelSize: 14
+                                color: "#94a3b8"
+                                renderType: Text.QtRendering
+                            }
+
+                            TextInput {
+                                id: customInputField
+                                Layout.fillWidth: true
+                                font.family: root.sfFont
+                                font.pixelSize: 14
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                                selectByMouse: true
+                                clip: true
+                                text: timerMenuCard.customInputText
+                                onTextChanged: timerMenuCard.customInputText = text
+
+                                Text {
+                                    text: "Minutes or mm:ss (e.g. 20 or 1:30)"
+                                    font.family: root.sfFont
+                                    font.pixelSize: 13
+                                    color: "#64748b"
+                                    visible: customInputField.text.length === 0
+                                    renderType: Text.QtRendering
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+
+                                onAccepted: {
+                                    var sec = timerMenuCard.parseCustomSeconds(customInputField.text)
+                                    root.timerSet(sec)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 4. Central Content: Stopwatch Mode
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+                    visible: timerMenuCard.subMode === "stopwatch"
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 80
+                        radius: 14
+                        color: root.timerRunning && root.timerMode === "stopwatch"
+                            ? Qt.rgba(0.06, 0.72, 0.51, 0.18)
+                            : "#15ffffff"
+                        border.color: root.timerRunning && root.timerMode === "stopwatch"
+                            ? Qt.rgba(0.06, 0.72, 0.51, 0.45)
+                            : "#20ffffff"
+                        border.width: 1
+
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            spacing: 3
+
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: (root.timerMode === "stopwatch" && root.timerIsSet) ? root.timerDisplay : "00:00"
+                                font.family: root.sfFont
+                                font.pixelSize: 32
+                                font.bold: true
+                                color: (root.timerRunning && root.timerMode === "stopwatch") ? "#ffffff" : "#cbd5e1"
+                                renderType: Text.QtRendering
+                            }
+
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: (root.timerRunning && root.timerMode === "stopwatch") ? "Stopwatch Active" : "Ready to measure"
+                                font.family: root.sfFont
+                                font.pixelSize: 11
+                                color: (root.timerRunning && root.timerMode === "stopwatch") ? "#10b981" : "#94a3b8"
+                                renderType: Text.QtRendering
+                            }
+                        }
+                    }
+                }
+
+                // Hairline Separator
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 1
+                    color: "#20ffffff"
+                }
+
+                // 5. Action Row: Reset Button + Start / Toggle Button
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    // Reset Button
+                    Rectangle {
+                        Layout.preferredWidth: 90
+                        Layout.preferredHeight: 38
+                        radius: 10
+                        color: resetMouse.containsMouse ? "#30ffffff" : "#18ffffff"
+                        border.color: "#30ffffff"
+                        border.width: 1
+
+                        RowLayout {
+                            anchors.centerIn: parent
+                            spacing: 6
+                            Text {
+                                text: "↺"
+                                font.family: root.sfFontBold
+                                font.pixelSize: 14
+                                color: "#e2e8f0"
+                                renderType: Text.QtRendering
+                            }
+                            Text {
+                                text: "Reset"
+                                font.family: root.sfFontSemibold
+                                font.pixelSize: 13
+                                color: "#e2e8f0"
+                                renderType: Text.QtRendering
+                            }
+                        }
+
+                        MouseArea {
+                            id: resetMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.timerReset()
+                            }
+                        }
+                    }
+
+                    // Primary Start / Toggle Button
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 38
+                        radius: 10
+                        color: {
+                            if (root.timerOvertimeActive) return "#f43f5e"
+                            if (root.timerRunning) return "#334155"
+                            return "#10b981"
+                        }
+                        border.color: {
+                            if (root.timerOvertimeActive) return "#fda4af"
+                            if (root.timerRunning) return "#64748b"
+                            return "#34d399"
+                        }
+                        border.width: 1
+
+                        Behavior on color { ColorAnimation { duration: 150 } }
+
+                        RowLayout {
+                            anchors.centerIn: parent
+                            spacing: 6
+
+                            Text {
+                                font.family: root.iconFont
+                                font.pixelSize: 14
+                                color: "#ffffff"
+                                text: {
+                                    if (root.timerOvertimeActive) return "󰓛"
+                                    if (root.timerRunning) return "󰏤"
+                                    return "󰐊"
+                                }
+                                renderType: Text.QtRendering
+                            }
+
+                            Text {
+                                text: {
+                                    if (root.timerOvertimeActive) return "Stop Overtime"
+                                    if (root.timerRunning) return "Pause"
+                                    if (timerMenuCard.subMode === "stopwatch") {
+                                        return (root.timerMode === "stopwatch" && root.timerIsSet) ? "Resume" : "Start Stopwatch"
+                                    }
+                                    return (root.timerMode === "timer" && root.timerIsSet) ? "Resume" : "Start Timer"
+                                }
+                                font.family: root.sfFontBold
+                                font.pixelSize: 14
+                                color: "#ffffff"
+                                renderType: Text.QtRendering
+                            }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (root.timerOvertimeActive) {
+                                    root.timerReset()
+                                    return
+                                }
+                                if (timerMenuCard.subMode === "stopwatch") {
+                                    if (root.timerMode === "stopwatch" && root.timerIsSet) {
+                                        root.timerToggle()
+                                    } else {
+                                        root.timerSetStopwatch()
+                                    }
+                                } else {
+                                    if (root.timerMode === "timer" && root.timerIsSet) {
+                                        root.timerToggle()
+                                    } else {
+                                        var targetSec = timerMenuCard.isCustom
+                                            ? timerMenuCard.parseCustomSeconds(timerMenuCard.customInputText)
+                                            : timerMenuCard.selectedPreset
+                                        root.timerSet(targetSec)
+                                    }
                                 }
                             }
                         }

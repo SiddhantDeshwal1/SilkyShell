@@ -855,6 +855,7 @@ Item {
                 font.family: root.sfFont
                 font.pixelSize: 19
                 font.bold: false
+                renderType: Text.NativeRendering
                 color: "#cc241d"
                 text: ""
                 visible: false
@@ -897,6 +898,7 @@ Item {
                         font.family: root.sfFont
                         font.pixelSize: 19
                         font.bold: false
+                        renderType: Text.NativeRendering
                         color: slotATitle.color
                         text: slotATitle.text
                     }
@@ -908,6 +910,7 @@ Item {
                         font.family: root.sfFont
                         font.pixelSize: 19
                         font.bold: false
+                        renderType: Text.NativeRendering
                         color: slotATitle.color
                         text: slotATitle.text
                         visible: slotATitle.isOverflow
@@ -1224,6 +1227,7 @@ Item {
             font.family: root.sfFont
             font.pixelSize: 19
             font.bold: false
+            renderType: Text.NativeRendering
             color: "#ebdbb2"
             text: ""
             visible: false
@@ -1266,6 +1270,7 @@ Item {
                     font.family: root.sfFont
                     font.pixelSize: 19
                     font.bold: false
+                    renderType: Text.NativeRendering
                     color: slotBTitle.color
                     text: slotBTitle.text
                 }
@@ -1277,6 +1282,7 @@ Item {
                     font.family: root.sfFont
                     font.pixelSize: 19
                     font.bold: false
+                    renderType: Text.NativeRendering
                     color: slotBTitle.color
                     text: slotBTitle.text
                     visible: slotBTitle.isOverflow

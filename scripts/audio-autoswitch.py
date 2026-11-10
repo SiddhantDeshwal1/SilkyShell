@@ -34,6 +34,43 @@ except ImportError:
         except Exception:
             pass
 
+def _set_pdeathsig():
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        libc.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+def kill_orphan_pactl():
+    """Kill leaked pactl subscribe processes from previous Quickshell sessions."""
+    me = os.getuid()
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-u", str(me), "-x", "pactl"], text=True
+        ).split()
+    except Exception:
+        return
+    for pid_str in out:
+        try:
+            pid = int(pid_str)
+            with open(f"/proc/{pid}/status") as f:
+                content = f.read()
+            ppid_line = [l for l in content.splitlines() if l.startswith("PPid:")]
+            if ppid_line:
+                ppid = int(ppid_line[0].split()[1])
+                if ppid == 1:
+                    try:
+                        with open(f"/proc/{pid}/cmdline", "rb") as cf:
+                            cmdline = cf.read().decode("utf-8", errors="ignore")
+                        if "subscribe" in cmdline:
+                            os.kill(pid, signal.SIGTERM)
+                            log(f"Killed orphaned pactl subscribe process (PID: {pid})")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
 CACHE_DIR = Path.home() / ".cache" / "quickshell"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 STACK_FILE = CACHE_DIR / "audio_device_stack.json"
@@ -533,7 +570,8 @@ class AudioAutoSwitcher:
             self.pactl_proc = subprocess.Popen(
                 ["pactl", "subscribe"],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL
+                stderr=subprocess.DEVNULL,
+                preexec_fn=_set_pdeathsig
             )
             fd = self.pactl_proc.stdout.fileno()
             fl = fcntl.fcntl(fd, fcntl.F_GETFL)
@@ -575,6 +613,7 @@ class AudioAutoSwitcher:
 
     def run_daemon(self):
         set_parent_death_signal()
+        kill_orphan_pactl()
         log("Starting audio-autoswitch daemon...")
         if not self.acquire_lock(wait=False):
             log("Daemon already running. Blocking wait...")
