@@ -155,9 +155,29 @@ window.background.csd.thunar > grid.horizontal > paned.horizontal > scrolledwind
 /* Thunar selection highlight */
 .thunar .view:selected,
 .thunar iconview:selected,
-.thunar treeview.view:selected {{
+.thunar treeview.view:selected,
+.thunar .standard-view .view:selected,
+.thunar .standard-view iconview:selected,
+.thunar .standard-view treeview.view:selected,
+window.background.csd.thunar .view:selected,
+window.background.csd.thunar iconview:selected,
+window.background.csd.thunar treeview.view:selected,
+window.background.csd.thunar .standard-view .view:selected,
+window.background.thunar .view:selected,
+window.background.thunar iconview:selected,
+window.background.thunar treeview.view:selected {{
     background-color: alpha({norm_accent}, 0.28);
-    color: {norm_fg0};
+    color: #ffffff;
+}}
+
+.thunar .view:backdrop:selected,
+.thunar iconview:backdrop:selected,
+.thunar treeview.view:backdrop:selected,
+.thunar .standard-view .view:backdrop:selected,
+window.background.csd.thunar .view:backdrop:selected,
+window.background.csd.thunar iconview:backdrop:selected,
+window.background.csd.thunar treeview.view:backdrop:selected {{
+    color: #ffffff;
 }}
 """
 

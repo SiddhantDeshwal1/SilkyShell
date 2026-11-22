@@ -168,7 +168,7 @@ PanelWindow {
     property string powerWattage: "15W"
     property string powerGovernor: "schedutil"
     property string powerScheduler: "scx_rusty"
-    property string powerTemp: "100°C"
+    property string powerTemp: "95°C"
 
     function parsePowerJson(jsonStr) {
         if (!jsonStr || !jsonStr.startsWith("{")) return
@@ -179,7 +179,7 @@ PanelWindow {
                 root.powerWattage = obj.wattage || "15W"
                 root.powerGovernor = obj.governor || "schedutil"
                 root.powerScheduler = obj.scheduler || "scx_rusty"
-                root.powerTemp = obj.temp || "100°C"
+                root.powerTemp = obj.temp || "95°C"
             }
         } catch(e) {}
     }
@@ -229,8 +229,9 @@ PanelWindow {
             case "peak":         root.powerWattage = "35W"; root.powerTemp = "100°C"; break;
             case "performance":  root.powerWattage = "30W"; root.powerTemp = "100°C"; break;
             case "boost":        root.powerWattage = "25W"; root.powerTemp = "100°C"; break;
-            case "balanced":     root.powerWattage = "15W"; root.powerTemp = "100°C"; break;
-            case "batterysaver": root.powerWattage = "10W"; root.powerTemp = "100°C"; break;
+            case "dynamic":      root.powerWattage = "20W"; root.powerTemp = "95°C";  break;
+            case "balanced":     root.powerWattage = "15W"; root.powerTemp = "95°C";  break;
+            case "batterysaver": root.powerWattage = "10W"; root.powerTemp = "95°C";  break;
         }
         pwrSetProc.command = ["python3", Paths.script("power-service.py"), "set", m]
         pwrSetProc.running = true
@@ -283,6 +284,8 @@ PanelWindow {
     property int displaySelectedIdx: 0
     property bool displayProfilesExpanded: false
     property bool displayArrangeExpanded: false
+    property bool displayResolutionExpanded: false
+    property int displaySelectedRate: 0
 
     function parseDisplayJson(jsonStr) {
         if (!jsonStr || !jsonStr.startsWith("{")) return
@@ -652,6 +655,7 @@ PanelWindow {
         wifiPasswordPromptOpen = false
         displayProfilesExpanded = false
         displayArrangeExpanded = false
+        displayResolutionExpanded = false
         root.multiMixerVolumeDevice = ""
     }
 
@@ -721,6 +725,7 @@ PanelWindow {
         if (currentView === "bluetooth") stopBluetoothScan()
         displayProfilesExpanded = false
         displayArrangeExpanded = false
+        displayResolutionExpanded = false
         root.setupMenuOrigin(displayMenuCard, dispCard, 0, 75, 1.0, 0.224, 107)
         open = true
         currentView = "display"
@@ -751,6 +756,7 @@ PanelWindow {
         wifiPasswordPromptOpen = false
         displayProfilesExpanded = false
         displayArrangeExpanded = false
+        displayResolutionExpanded = false
         root.multiMixerVolumeDevice = ""
     }
 
@@ -1238,8 +1244,12 @@ PanelWindow {
         if (!displayStateProc.running) displayStateProc.running = true
     }
 
-    function setDisplayResolution(monName, res) {
-        displayActionProc.command = ["python3", Paths.script("display-manager.py"), "set-resolution", monName, res]
+    function setDisplayResolution(monName, res, rate) {
+        const cmd = ["python3", Paths.script("display-manager.py"), "set-resolution", monName, res]
+        if (rate !== undefined && rate !== null && rate > 0) {
+            cmd.push(rate.toString())
+        }
+        displayActionProc.command = cmd
         displayActionProc.running = true
     }
 
@@ -6039,7 +6049,7 @@ PanelWindow {
                     sub: "35W / 100°C",
                     watt: "35W",
                     col: "#f43f5e",
-                    icon: "󰓅"
+                    icon: ""
                 },
                 {
                     key: "performance",
@@ -6047,7 +6057,7 @@ PanelWindow {
                     sub: "30W / 100°C",
                     watt: "30W",
                     col: "#f97316",
-                    icon: "󰈸"
+                    icon: "󱗆"
                 },
                 {
                     key: "boost",
@@ -6055,23 +6065,31 @@ PanelWindow {
                     sub: "25W / 100°C",
                     watt: "25W",
                     col: "#a855f7",
-                    icon: "󰌠"
+                    icon: "󱖿"
+                },
+                {
+                    key: "dynamic",
+                    title: "Dynamic 20W",
+                    sub: "20W / 95°C",
+                    watt: "20W",
+                    col: "#6366f1",
+                    icon: "󰤇"
                 },
                 {
                     key: "balanced",
                     title: "Balanced 15W",
-                    sub: "15W / 100°C",
+                    sub: "15W / 95°C",
                     watt: "15W",
                     col: "#0ea5e9",
-                    icon: "󰞬"
+                    icon: "󰄛"
                 },
                 {
                     key: "batterysaver",
                     title: "Battery Saver 10W",
-                    sub: "10W / 100°C",
+                    sub: "10W / 95°C",
                     watt: "10W",
                     col: "#10b981",
-                    icon: "󰌪"
+                    icon: "󰳗"
                 }
             ]
 
@@ -6758,86 +6776,7 @@ PanelWindow {
                         }
                     }
 
-                    // 4. Resolution Switcher Section
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 6
-                        visible: root.displayMonitors.length > 0
-
-                        property var curMon: (root.displayMonitors.length > root.displaySelectedIdx) ? root.displayMonitors[root.displaySelectedIdx] : (root.displayMonitors.length > 0 ? root.displayMonitors[0] : null)
-
-                        RowLayout {
-                            Layout.fillWidth: true
-
-                            Text {
-                                text: "RESOLUTION — " + (parent.parent.curMon ? parent.parent.curMon.name : "")
-                                font.family: root.sfFont
-                                font.pixelSize: 13
-                                font.bold: true
-                                color: "#cbd5e1"
-                                Layout.fillWidth: true
-                                renderType: Text.QtRendering
-                            }
-
-                            Text {
-                                text: parent.parent.curMon ? parent.parent.curMon.currentResolution : ""
-                                font.family: root.sfFontBold
-                                font.pixelSize: 12
-                                color: "#38bdf8"
-                                renderType: Text.QtRendering
-                            }
-                        }
-
-                        // Resolution Chips Grid / Flow
-                        Flow {
-                            Layout.fillWidth: true
-                            spacing: 6
-
-                            Repeater {
-                                model: parent.parent.curMon ? parent.parent.curMon.resolutions.slice(0, 8) : []
-
-                                delegate: Rectangle {
-                                    implicitHeight: 30
-                                    implicitWidth: resText.implicitWidth + 20
-                                    radius: 15
-
-                                    property bool isCurrent: Boolean(parent && parent.parent && parent.parent.parent && parent.parent.parent.curMon && parent.parent.parent.curMon.currentResolution === modelData)
-
-                                    color: isCurrent ? "#007aff" : (resMouse.containsMouse ? "#28ffffff" : "#14ffffff")
-                                    border.color: isCurrent ? "#80ffffff" : "#20ffffff"
-                                    border.width: 1
-
-                                    scale: resMouse.pressed ? 0.94 : 1.0
-                                    Behavior on scale { NumberAnimation { duration: 100 } }
-                                    Behavior on color { ColorAnimation { duration: 150 } }
-
-                                    Text {
-                                        id: resText
-                                        anchors.centerIn: parent
-                                        font.family: root.sfFontSemibold
-                                        font.pixelSize: 13
-                                        color: isCurrent ? "#ffffff" : "#e2e8f0"
-                                        text: modelData
-                                        renderType: Text.QtRendering
-                                    }
-
-                                    MouseArea {
-                                        id: resMouse
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            if (parent.parent.parent.curMon) {
-                                                root.setDisplayResolution(parent.parent.parent.curMon.name, modelData)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 5. Sharing / Topology Section (Extend vs Mirror) - Only visible when ext display connected
+                    // 4. Sharing / Topology Section (Extend vs Mirror) - Only visible when ext display connected
                     ColumnLayout {
                         id: arrangeSection
                         Layout.fillWidth: true
@@ -6847,7 +6786,7 @@ PanelWindow {
                         property var curMon: (root.displayMonitors.length > root.displaySelectedIdx) ? root.displayMonitors[root.displaySelectedIdx] : (root.displayMonitors.length > 0 ? root.displayMonitors[0] : null)
 
                         Text {
-                            text: "ARRANGEMENT & SHARING"
+                            text: "SHARING MODE"
                             font.family: root.sfFont
                             font.pixelSize: 13
                             font.bold: true
@@ -7280,6 +7219,311 @@ PanelWindow {
                                                     onClicked: {
                                                         if (arrangeSection.curMon) {
                                                             root.setDisplayOrientation(arrangeSection.curMon.name, modelData.transform)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 5. Resolution Section (Expandable Menu)
+                    ColumnLayout {
+                        id: resolutionSection
+                        Layout.fillWidth: true
+                        spacing: 8
+                        visible: root.displayMonitors.length > 0
+
+                        property var curMon: (root.displayMonitors.length > root.displaySelectedIdx) ? root.displayMonitors[root.displaySelectedIdx] : (root.displayMonitors.length > 0 ? root.displayMonitors[0] : null)
+
+                        readonly property int effectiveSelectedRate: {
+                            if (!curMon) return 60
+                            if (root.displaySelectedRate > 0 && curMon.modesByRate && curMon.modesByRate[root.displaySelectedRate.toString()]) {
+                                return root.displaySelectedRate
+                            }
+                            return curMon.currentRefreshRate || (curMon.refreshRates && curMon.refreshRates.length > 0 ? curMon.refreshRates[0] : 60)
+                        }
+
+                        // Expand / Collapse Header Button
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: 44
+                            radius: 12
+                            color: resHeaderMouse.containsMouse ? "#26ffffff" : "#16ffffff"
+                            border.color: "#20ffffff"
+                            border.width: 1
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 12
+                                anchors.rightMargin: 12
+                                spacing: 10
+
+                                Text {
+                                    font.family: root.iconFont
+                                    font.pixelSize: 20
+                                    color: "#38bdf8"
+                                    text: "󰍹"
+                                }
+
+                                Text {
+                                    text: "Resolution"
+                                    font.family: root.sfFontSemibold
+                                    font.pixelSize: 15
+                                    color: "#ffffff"
+                                }
+
+                                Item { Layout.fillWidth: true }
+
+                                Rectangle {
+                                    implicitHeight: 22
+                                    implicitWidth: resBadgeText.implicitWidth + 14
+                                    radius: 11
+                                    color: "#2538bdf8"
+
+                                    Text {
+                                        id: resBadgeText
+                                        anchors.centerIn: parent
+                                        font.family: root.sfFontBold
+                                        font.pixelSize: 11
+                                        color: "#38bdf8"
+                                        text: resolutionSection.curMon ? (resolutionSection.curMon.currentResolution + " @ " + resolutionSection.curMon.currentRefreshRate + "Hz") : ""
+                                    }
+                                }
+
+                                Text {
+                                    id: resChevron
+                                    font.family: root.iconFont
+                                    font.pixelSize: 18
+                                    color: "#94a3b8"
+                                    text: "󰅀"
+                                    rotation: root.displayResolutionExpanded ? 180 : 0
+                                    transformOrigin: Item.Center
+                                    Behavior on rotation {
+                                        NumberAnimation {
+                                            duration: 350
+                                            easing.type: Easing.BezierSpline
+                                            easing.bezierCurve: root.springCurve
+                                        }
+                                    }
+                                }
+                            }
+
+                            MouseArea {
+                                id: resHeaderMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.displayResolutionExpanded = !root.displayResolutionExpanded
+                                }
+                            }
+                        }
+
+                        // Expandable Animated Container
+                        Item {
+                            id: resContainer
+                            Layout.fillWidth: true
+                            clip: true
+                            implicitHeight: root.displayResolutionExpanded ? resCol.implicitHeight : 0
+                            visible: root.displayResolutionExpanded || implicitHeight > 0.5
+                            enabled: root.displayResolutionExpanded
+
+                            Behavior on implicitHeight {
+                                NumberAnimation {
+                                    duration: 440
+                                    easing.type: Easing.BezierSpline
+                                    easing.bezierCurve: root.springCurve
+                                }
+                            }
+
+                            ColumnLayout {
+                                id: resCol
+                                width: parent.width
+                                y: root.displayResolutionExpanded ? 0 : -14
+                                opacity: root.displayResolutionExpanded ? 1.0 : 0.0
+                                spacing: 10
+
+                                Behavior on y {
+                                    NumberAnimation {
+                                        duration: 440
+                                        easing.type: Easing.BezierSpline
+                                        easing.bezierCurve: root.springCurve
+                                    }
+                                }
+
+                                Behavior on opacity {
+                                    NumberAnimation {
+                                        duration: 280
+                                        easing.type: Easing.OutQuad
+                                    }
+                                }
+
+                                // 5.1 Refresh Rate Selector Section
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Text {
+                                            text: "REFRESH RATE"
+                                            font.family: root.sfFont
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                            color: "#94a3b8"
+                                            renderType: Text.QtRendering
+                                            Layout.fillWidth: true
+                                        }
+
+                                        Text {
+                                            text: resolutionSection.effectiveSelectedRate + "Hz ACTIVE"
+                                            font.family: root.sfFontBold
+                                            font.pixelSize: 10
+                                            color: "#38bdf8"
+                                            renderType: Text.QtRendering
+                                        }
+                                    }
+
+                                    Flow {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+
+                                        Repeater {
+                                            model: (resolutionSection.curMon && resolutionSection.curMon.refreshRates) ? resolutionSection.curMon.refreshRates : [60]
+
+                                            delegate: Rectangle {
+                                                implicitHeight: 30
+                                                implicitWidth: rateText.implicitWidth + 22
+                                                radius: 15
+
+                                                property bool isFilterSelected: resolutionSection.effectiveSelectedRate === modelData
+                                                property bool isHwActive: resolutionSection.curMon && resolutionSection.curMon.currentRefreshRate === modelData
+
+                                                color: isFilterSelected ? "#007aff" : (rateMouse.containsMouse ? "#28ffffff" : "#14ffffff")
+                                                border.color: isFilterSelected ? "#80ffffff" : (isHwActive ? "#6038bdf8" : "#20ffffff")
+                                                border.width: 1
+
+                                                scale: rateMouse.pressed ? 0.94 : 1.0
+                                                Behavior on scale { NumberAnimation { duration: 100 } }
+                                                Behavior on color { ColorAnimation { duration: 150 } }
+
+                                                RowLayout {
+                                                    anchors.centerIn: parent
+                                                    spacing: 4
+
+                                                    Text {
+                                                        id: rateText
+                                                        font.family: root.sfFontSemibold
+                                                        font.pixelSize: 13
+                                                        color: isFilterSelected ? "#ffffff" : (isHwActive ? "#38bdf8" : "#e2e8f0")
+                                                        text: modelData + "Hz"
+                                                        renderType: Text.QtRendering
+                                                    }
+
+                                                    Rectangle {
+                                                        visible: isHwActive && !isFilterSelected
+                                                        implicitWidth: 5
+                                                        implicitHeight: 5
+                                                        radius: 2.5
+                                                        color: "#38bdf8"
+                                                    }
+                                                }
+
+                                                MouseArea {
+                                                    id: rateMouse
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: {
+                                                        root.displaySelectedRate = modelData
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // 5.2 Supported Resolutions for Selected Refresh Rate
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+
+                                        Text {
+                                            text: "SUPPORTED RESOLUTIONS (" + resolutionSection.effectiveSelectedRate + "Hz)"
+                                            font.family: root.sfFont
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                            color: "#94a3b8"
+                                            Layout.fillWidth: true
+                                            renderType: Text.QtRendering
+                                        }
+
+                                        Text {
+                                            text: resolutionSection.curMon ? resolutionSection.curMon.currentResolution : ""
+                                            font.family: root.sfFontBold
+                                            font.pixelSize: 11
+                                            color: "#38bdf8"
+                                            renderType: Text.QtRendering
+                                        }
+                                    }
+
+                                    Flow {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+
+                                        Repeater {
+                                            model: {
+                                                const m = resolutionSection.curMon
+                                                if (!m) return []
+                                                const rateKey = resolutionSection.effectiveSelectedRate.toString()
+                                                if (m.modesByRate && m.modesByRate[rateKey]) {
+                                                    return m.modesByRate[rateKey]
+                                                }
+                                                return m.resolutions || []
+                                            }
+
+                                            delegate: Rectangle {
+                                                implicitHeight: 30
+                                                implicitWidth: resText.implicitWidth + 20
+                                                radius: 15
+
+                                                property bool isCurrent: Boolean(resolutionSection.curMon &&
+                                                    resolutionSection.curMon.currentResolution === modelData &&
+                                                    resolutionSection.curMon.currentRefreshRate === resolutionSection.effectiveSelectedRate)
+
+                                                color: isCurrent ? "#007aff" : (resMouse.containsMouse ? "#28ffffff" : "#14ffffff")
+                                                border.color: isCurrent ? "#80ffffff" : "#20ffffff"
+                                                border.width: 1
+
+                                                scale: resMouse.pressed ? 0.94 : 1.0
+                                                Behavior on scale { NumberAnimation { duration: 100 } }
+                                                Behavior on color { ColorAnimation { duration: 150 } }
+
+                                                Text {
+                                                    id: resText
+                                                    anchors.centerIn: parent
+                                                    font.family: root.sfFontSemibold
+                                                    font.pixelSize: 13
+                                                    color: isCurrent ? "#ffffff" : "#e2e8f0"
+                                                    text: modelData
+                                                    renderType: Text.QtRendering
+                                                }
+
+                                                MouseArea {
+                                                    id: resMouse
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: {
+                                                        if (resolutionSection.curMon) {
+                                                            root.setDisplayResolution(resolutionSection.curMon.name, modelData, resolutionSection.effectiveSelectedRate)
                                                         }
                                                     }
                                                 }

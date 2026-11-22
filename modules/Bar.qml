@@ -129,6 +129,7 @@ PanelWindow {
         Item { Layout.fillWidth: true }
 
         // ── RIGHT SECTION ─────────────────────────────────────────────
+        VoiceDictationWidget {}
         TimerBarPreview {
             controlCenter: controlCenterPanel
         }
