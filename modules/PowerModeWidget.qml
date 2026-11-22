@@ -6,8 +6,9 @@ import Quickshell.Io
 // ─────────────────────────────────────────────────────────────────────────────
 // PowerModeWidget — macOS / iOS Style APU Power Capsule (182x70, radius 35).
 // Modes:
-//   - Battery Saver (10W / 100°C | powersave | scx_lavd)
-//   - Balanced      (15W / 100°C | schedutil | scx_rusty)
+//   - Battery Saver (10W / 95°C  | powersave | scx_lavd)
+//   - Balanced      (15W / 95°C  | schedutil | scx_rusty)
+//   - Dynamic       (20W / 95°C  | schedutil | scx_rusty)
 //   - Boost         (25W / 100°C | performance | scx_bpfland)
 //   - Performance   (30W / 100°C | performance | scx_bpfland)
 //   - Peak          (35W / 100°C | performance | scx_bpfland)
@@ -44,10 +45,10 @@ LiquidGlassCard {
     property string modeName: "Balanced"
     property string shortName: "Bal"
     property string wattage: "15W"
-    property string temp: "100°C"
-    property string iconStr: "󰞬"
+    property string temp: "95°C"
+    property string iconStr: "󰄛"
     property color  modeColor: "#0ea5e9"
-    property int    levelIndex: 1 // 0: Eco, 1: Bal, 2: Boost, 3: Perf, 4: Peak
+    property int    levelIndex: 1 // 0: Eco, 1: Bal, 2: Dyn, 3: Boost, 4: Perf, 5: Peak
     property bool   pendingCommit: debounceTimer.running || committingGuardTimer.running
 
     isActive: false
@@ -57,6 +58,7 @@ LiquidGlassCard {
             case "peak":         return Qt.rgba(0.96, 0.25, 0.38, 0.28);
             case "performance":  return Qt.rgba(0.98, 0.45, 0.09, 0.26);
             case "boost":        return Qt.rgba(0.66, 0.33, 0.97, 0.26);
+            case "dynamic":      return Qt.rgba(0.39, 0.40, 0.95, 0.26);
             case "balanced":     return Qt.rgba(0.06, 0.65, 0.91, 0.26);
             case "batterysaver": return Qt.rgba(0.06, 0.72, 0.51, 0.26);
             default:             return Qt.rgba(0.06, 0.65, 0.91, 0.26);
@@ -67,11 +69,12 @@ LiquidGlassCard {
 
     // ── Cyclic Modes Definition (High-Tech Vector Glyphs) ─────────────
     readonly property var modeList: [
-        { key: "batterysaver", name: "Battery Saver", short: "Eco",   watt: "10W", temp: "100°C", icon: "󰌪", col: "#10b981", idx: 0 },
-        { key: "balanced",     name: "Balanced",      short: "Bal",   watt: "15W", temp: "100°C", icon: "󰞬", col: "#0ea5e9", idx: 1 },
-        { key: "boost",        name: "Boost",         short: "Boost", watt: "25W", temp: "100°C", icon: "󰌠", col: "#a855f7", idx: 2 },
-        { key: "performance",  name: "Performance",   short: "Perf",  watt: "30W", temp: "100°C", icon: "󰈸", col: "#f97316", idx: 3 },
-        { key: "peak",         name: "Peak",          short: "Peak",  watt: "35W", temp: "100°C", icon: "󰓅", col: "#f43f5e", idx: 4 }
+        { key: "batterysaver", name: "Battery Saver", short: "Eco",   watt: "10W", temp: "95°C",  icon: "󰳗", col: "#10b981", idx: 0 },
+        { key: "balanced",     name: "Balanced",      short: "Bal",   watt: "15W", temp: "95°C",  icon: "󰄛", col: "#0ea5e9", idx: 1 },
+        { key: "dynamic",      name: "Dynamic",       short: "Dyn",   watt: "20W", temp: "95°C",  icon: "󰤇", col: "#6366f1", idx: 2 },
+        { key: "boost",        name: "Boost",         short: "Boost", watt: "25W", temp: "100°C", icon: "󱖿", col: "#a855f7", idx: 3 },
+        { key: "performance",  name: "Performance",   short: "Perf",  watt: "30W", temp: "100°C", icon: "󱗆", col: "#f97316", idx: 4 },
+        { key: "peak",         name: "Peak",          short: "Peak",  watt: "35W", temp: "100°C", icon: "", col: "#f43f5e", idx: 5 }
     ]
 
     onActiveModeChanged: {
@@ -82,6 +85,7 @@ LiquidGlassCard {
 
     // ── Local Mode Transition (Instant 60fps Visual Feedback) ─────────
     function applyLocalMode(mKey) {
+        if (mKey === "20w" || mKey === "comfort" || mKey === "standard") mKey = "dynamic"
         let found = null
         for (let i = 0; i < modeList.length; i++) {
             if (modeList[i].key === mKey) {

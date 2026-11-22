@@ -44,9 +44,9 @@ MODES = {
         "glowColor": "rgba(244, 63, 94, 0.45)",
         "gradientStart": "#fb7185",
         "gradientEnd": "#e11d48",
-        "icon": "󰓅",
+        "icon": "",
         "description": "Redlining the APU (35W / 100°C)",
-        "levelIndex": 4
+        "levelIndex": 5
     },
     "performance": {
         "mode": "performance",
@@ -65,9 +65,9 @@ MODES = {
         "glowColor": "rgba(249, 115, 22, 0.45)",
         "gradientStart": "#fb923c",
         "gradientEnd": "#ea580c",
-        "icon": "󰈸",
+        "icon": "󱗆",
         "description": "Maxing out the APU (30W / 100°C)",
-        "levelIndex": 3
+        "levelIndex": 4
     },
     "boost": {
         "mode": "boost",
@@ -86,8 +86,29 @@ MODES = {
         "glowColor": "rgba(168, 85, 247, 0.45)",
         "gradientStart": "#c084fc",
         "gradientEnd": "#9333ea",
-        "icon": "󰌠",
+        "icon": "󱖿",
         "description": "Boosting APU performance (25W / 100°C)",
+        "levelIndex": 3
+    },
+    "dynamic": {
+        "mode": "dynamic",
+        "name": "Dynamic",
+        "shortName": "Dyn",
+        "tag": "Dynamic APU",
+        "wattage": "20W",
+        "temp": "95°C",
+        "stapmLimit": 20000,
+        "fastLimit": 20000,
+        "slowLimit": 20000,
+        "tempLimit": 95,
+        "governor": "schedutil",
+        "scheduler": "scx_rusty",
+        "color": "#6366f1",
+        "glowColor": "rgba(99, 102, 241, 0.45)",
+        "gradientStart": "#818cf8",
+        "gradientEnd": "#4f46e5",
+        "icon": "󰤇",
+        "description": "Dynamic APU performance (20W / 95°C)",
         "levelIndex": 2
     },
     "balanced": {
@@ -96,19 +117,19 @@ MODES = {
         "shortName": "Bal",
         "tag": "Stock Limits",
         "wattage": "15W",
-        "temp": "100°C",
+        "temp": "95°C",
         "stapmLimit": 15000,
         "fastLimit": 15000,
         "slowLimit": 15000,
-        "tempLimit": 100,
+        "tempLimit": 95,
         "governor": "schedutil",
         "scheduler": "scx_rusty",
         "color": "#0ea5e9",
         "glowColor": "rgba(14, 165, 233, 0.45)",
         "gradientStart": "#38bdf8",
         "gradientEnd": "#0284c7",
-        "icon": "󰞬",
-        "description": "Restoring stock APU limits (15W / 100°C)",
+        "icon": "󰄛",
+        "description": "Restoring stock APU limits (15W / 95°C)",
         "levelIndex": 1
     },
     "batterysaver": {
@@ -117,19 +138,19 @@ MODES = {
         "shortName": "Eco",
         "tag": "Longevity",
         "wattage": "10W",
-        "temp": "100°C",
+        "temp": "95°C",
         "stapmLimit": 10000,
         "fastLimit": 10000,
         "slowLimit": 10000,
-        "tempLimit": 100,
+        "tempLimit": 95,
         "governor": "powersave",
         "scheduler": "scx_lavd",
         "color": "#10b981",
         "glowColor": "rgba(16, 185, 129, 0.45)",
         "gradientStart": "#34d399",
         "gradientEnd": "#059669",
-        "icon": "󰌪",
-        "description": "Underclocking for longevity (10W / 100°C)",
+        "icon": "󰳗",
+        "description": "Underclocking for longevity (10W / 95°C)",
         "levelIndex": 0
     }
 }
@@ -152,6 +173,8 @@ def normalize_mode(mode_str):
         return "performance"
     elif m in ["boost", "gaming", "game", "high", "max25", "25w", "25"]:
         return "boost"
+    elif m in ["dynamic", "dyn", "comfort", "comf", "standard", "std", "enhanced", "optimal", "opt", "max20", "20w", "20"]:
+        return "dynamic"
     elif m in ["balanced", "bal", "normal", "stock", "default", "15w", "15"]:
         return "balanced"
     elif m in ["batterysaver", "battery", "saver", "save", "eco", "powersave", "10w", "10"]:
