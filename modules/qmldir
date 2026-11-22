@@ -22,6 +22,7 @@ OsdPill 1.0 OsdPill.qml
 PowerModeWidget 1.0 PowerModeWidget.qml
 TimerWidget 1.0 TimerWidget.qml
 TimerBarPreview 1.0 TimerBarPreview.qml
+VoiceDictationWidget 1.0 VoiceDictationWidget.qml
 StatusDevices 1.0 StatusDevices.qml
 SysStats 1.0 SysStats.qml
 Workspaces 1.0 Workspaces.qml
