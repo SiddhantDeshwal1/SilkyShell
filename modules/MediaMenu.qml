@@ -40,6 +40,11 @@ PanelWindow {
     property var activePlayer: null
     property var cavaBars: []
     property int vizStyle: 0          // 0=vertical, 1=symmetric, 2=wave
+    property int bottomTab: 0          // 0=Visualizer, 1=Live Lyrics
+    property var lyricsLines: []       // [{ time: number, text: string }]
+    property int currentLyricIndex: -1
+    property bool lyricsLoading: false
+    property string lastLyricsTrackKey: ""
     property real islandVol: 0
     property bool islandMuted: false
     property bool mouseInIsland: false
@@ -495,6 +500,7 @@ PanelWindow {
         open = true
         extractColorsFromCurrentTrack()
         queryPlayerInfo()
+        fetchLyrics()
         openAnim.restart()
     }
 
@@ -701,6 +707,9 @@ PanelWindow {
         running: root.open && root.effectivePlayer !== null && root.effectivePlayer.isPlaying && !root.isScrubbing
         onTriggered: {
             root.playerPos = root.getCurrentCalculatedPos()
+            if (root.bottomTab === 1) {
+                root.updateActiveLyricLine()
+            }
         }
     }
 
@@ -802,6 +811,154 @@ PanelWindow {
         }
         root.extractColorsFromCurrentTrack()
         root.queryPlayerInfo()
+        root.fetchLyrics()
+    }
+
+    // ── Dedicated Process Runner for Fetching Lyrics ──────────────────
+    Process {
+        id: lyricsFetchProc
+        property string accumulatedOutput: ""
+
+        onStarted: {
+            accumulatedOutput = ""
+            root.lyricsLoading = true
+        }
+
+        stdout: SplitParser {
+            onRead: function(line) {
+                lyricsFetchProc.accumulatedOutput += line + "\n"
+            }
+        }
+
+        onExited: function(code, status) {
+            running = false
+            root.lyricsLoading = false
+            const raw = lyricsFetchProc.accumulatedOutput.trim()
+            if (raw.length > 0) {
+                try {
+                    const parsed = JSON.parse(raw)
+                    if (Array.isArray(parsed)) {
+                        root.lyricsLines = parsed
+                    } else if (parsed && Array.isArray(parsed.lines)) {
+                        root.lyricsLines = parsed.lines
+                    } else if (parsed && Array.isArray(parsed.lyrics)) {
+                        root.lyricsLines = parsed.lyrics
+                    } else {
+                        root.lyricsLines = []
+                    }
+                } catch(e) {
+                    root.lyricsLines = []
+                }
+            } else {
+                root.lyricsLines = []
+            }
+            root.updateActiveLyricLine()
+            lyricsScrollTimer.restart()
+        }
+    }
+
+    function computeActiveLyricIndex(pos) {
+        const lines = root.lyricsLines
+        if (!lines || lines.length === 0) return -1
+        if (pos < (lines[0].time || 0)) return -1
+
+        let low = 0
+        let high = lines.length - 1
+        let best = -1
+        while (low <= high) {
+            const mid = Math.floor((low + high) / 2)
+            const itemTime = (lines[mid] && typeof lines[mid].time === "number") ? lines[mid].time : 0
+            if (itemTime <= pos) {
+                best = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return best
+    }
+
+    function updateActiveLyricLine() {
+        if (!root.lyricsLines || root.lyricsLines.length === 0) {
+            if (root.currentLyricIndex !== -1) root.currentLyricIndex = -1
+            return
+        }
+        const curPos = root.getCurrentCalculatedPos()
+        const newIdx = root.computeActiveLyricIndex(curPos)
+        if (newIdx !== root.currentLyricIndex) {
+            root.currentLyricIndex = newIdx
+        }
+    }
+
+    function scrollLyricsToActive() {
+        if (root.bottomTab === 1 && typeof lyricsListView !== "undefined" && lyricsListView && lyricsListView.count > 0 && root.currentLyricIndex >= 0 && root.currentLyricIndex < lyricsListView.count) {
+            if (!lyricsListView.moving && !lyricsListView.dragging) {
+                lyricsListView.positionViewAtIndex(root.currentLyricIndex, ListView.Center)
+            }
+        }
+    }
+
+    Timer {
+        id: lyricsScrollTimer
+        interval: 60
+        repeat: false
+        onTriggered: root.scrollLyricsToActive()
+    }
+
+    function fetchLyrics(force) {
+        const p = root.effectivePlayer
+        const title = p ? (p.trackTitle || "") : ""
+        const artist = p ? (p.trackArtist || "") : ""
+        const dbus = p ? (p.dbusName || "") : ""
+        const trackKey = (dbus + "::" + artist + "::" + title).trim()
+
+        if (!title && !artist) {
+            root.lyricsLines = []
+            root.lastLyricsTrackKey = ""
+            root.currentLyricIndex = -1
+            return
+        }
+
+        if (!force && trackKey === root.lastLyricsTrackKey && root.lyricsLines.length > 0) {
+            return
+        }
+
+        root.lastLyricsTrackKey = trackKey
+        root.lyricsLoading = true
+
+        if (lyricsFetchProc.running) lyricsFetchProc.running = false
+        lyricsFetchProc.command = ["python3", Paths.script("lyrics-service.py"), "get-lyrics"]
+        lyricsFetchProc.running = true
+    }
+
+    onCurrentLyricIndexChanged: {
+        if (root.bottomTab === 1 && root.currentLyricIndex >= 0) {
+            lyricsScrollTimer.restart()
+        }
+    }
+
+    onBottomTabChanged: {
+        if (bottomTab === 1) {
+            root.fetchLyrics()
+            root.updateActiveLyricLine()
+            lyricsScrollTimer.restart()
+        } else {
+            if (typeof vizCanvas !== "undefined" && vizCanvas.visible) {
+                vizCanvas.requestPaint()
+            }
+        }
+    }
+
+    onPlayerPosChanged: {
+        if (root.bottomTab === 1) {
+            root.updateActiveLyricLine()
+        }
+    }
+
+    onScrubPosChanged: {
+        if (root.bottomTab === 1 && root.isScrubbing) {
+            root.updateActiveLyricLine()
+        }
     }
 
     onEffectivePlayerChanged: root.handleTrackMetadataUpdate()
@@ -1032,6 +1189,9 @@ PanelWindow {
 
         width: 780
         implicitHeight: contentCol.implicitHeight + 32
+        Behavior on implicitHeight {
+            NumberAnimation { duration: 240; easing.type: Easing.OutCubic }
+        }
 
         // Top and bottom corners morph with spring expansion
         topLeftRadius: 18 + Math.round(4 * root.animProgress)
@@ -2157,12 +2317,15 @@ PanelWindow {
             }
 
             // ─────────────────────────────────────────────────────────
-            // LOWER PART: AUDIO VISUALIZER CARD (115px height)
+            // LOWER PART: AUDIO VISUALIZER & LIVE LYRICS (Dual-Tab Card)
             // ─────────────────────────────────────────────────────────
             Rectangle {
                 id: visualizerCard
                 Layout.fillWidth: true
-                implicitHeight: 115
+                implicitHeight: root.bottomTab === 1 ? 245 : 115
+                Behavior on implicitHeight {
+                    NumberAnimation { duration: 240; easing.type: Easing.OutCubic }
+                }
                 radius: 18
                 color: cardHovered ? "#14ffffff" : "#00000000"
                 border.color: cardHovered ? "#55ffffff" : "#33ffffff"
@@ -2185,25 +2348,121 @@ PanelWindow {
                 ColumnLayout {
                     anchors.fill: parent
                     anchors.margins: 12
-                    spacing: 6
+                    spacing: 8
 
-                    // Visualizer Header & Theme Switcher Controls (14px Bold SF Pro Rounded)
+                    // ── Header: Segmented Tab Switcher (Visualizer vs Live Lyrics) ──
                     RowLayout {
                         Layout.fillWidth: true
 
-                        Text {
-                            text: "AUDIO VISUALIZER"
-                            font.family: root.sfFont
-                            font.pixelSize: 14
-                            font.bold: true
-                            color: "#ffffff"
-                            renderType: Text.NativeRendering
+                        // Segmented Pill Tab Switcher: [ 󰐸 Visualizer | 󰎆 Live Lyrics ]
+                        Rectangle {
+                            implicitHeight: 28
+                            implicitWidth: tabSwitchRow.implicitWidth + 8
+                            radius: 14
+                            color: "#18ffffff"
+                            border.color: "#28ffffff"
+                            border.width: 1
+
+                            RowLayout {
+                                id: tabSwitchRow
+                                anchors.centerIn: parent
+                                spacing: 2
+
+                                // Tab 0: Visualizer
+                                Rectangle {
+                                    implicitHeight: 22
+                                    implicitWidth: tabVizContent.implicitWidth + 18
+                                    radius: 11
+                                    color: root.bottomTab === 0 ? "#33ffffff" : "transparent"
+                                    border.color: root.bottomTab === 0 ? "#55ffffff" : "transparent"
+                                    border.width: 1
+
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+                                    Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                                    RowLayout {
+                                        id: tabVizContent
+                                        anchors.centerIn: parent
+                                        spacing: 5
+
+                                        Text {
+                                            font.family: root.iconFont
+                                            font.pixelSize: 13
+                                            color: root.bottomTab === 0 ? "#ffffff" : "#88ffffff"
+                                            text: "󰐸"
+                                        }
+
+                                        Text {
+                                            id: vizTabLabel
+                                            font.family: root.sfFont
+                                            font.pixelSize: 12
+                                            font.bold: true
+                                            color: root.bottomTab === 0 ? "#ffffff" : "#88ffffff"
+                                            text: "VISUALIZER"
+                                            renderType: Text.NativeRendering
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: { root.bottomTab = 0 }
+                                    }
+                                }
+
+                                // Tab 1: Live Lyrics
+                                Rectangle {
+                                    implicitHeight: 22
+                                    implicitWidth: tabLyricsContent.implicitWidth + 18
+                                    radius: 11
+                                    color: root.bottomTab === 1 ? "#33ffffff" : "transparent"
+                                    border.color: root.bottomTab === 1 ? "#55ffffff" : "transparent"
+                                    border.width: 1
+
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+                                    Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                                    RowLayout {
+                                        id: tabLyricsContent
+                                        anchors.centerIn: parent
+                                        spacing: 5
+
+                                        Text {
+                                            font.family: root.iconFont
+                                            font.pixelSize: 13
+                                            color: root.bottomTab === 1 ? "#ffffff" : "#88ffffff"
+                                            text: "󰎆"
+                                        }
+
+                                        Text {
+                                            id: lyricsTabLabel
+                                            font.family: root.sfFont
+                                            font.pixelSize: 12
+                                            font.bold: true
+                                            color: root.bottomTab === 1 ? "#ffffff" : "#88ffffff"
+                                            text: "LIVE LYRICS"
+                                            renderType: Text.NativeRendering
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.bottomTab = 1
+                                            root.fetchLyrics()
+                                            root.updateActiveLyricLine()
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         Item { Layout.fillWidth: true }
 
-                        // Visualizer Theme Arrow Switcher (< Theme 1/2/3 >)
+                        // ── Tab 0 Right: Visualizer Theme Arrow Switcher (< Theme 1/2/3 >) ──
                         RowLayout {
+                            visible: root.bottomTab === 0
                             spacing: 10
 
                             Item {
@@ -2289,117 +2548,404 @@ PanelWindow {
                                 }
                             }
                         }
+
+                        // ── Tab 1 Right: Lyrics Info Readout & Refresh Button ──
+                        RowLayout {
+                            visible: root.bottomTab === 1
+                            spacing: 8
+
+                            Text {
+                                font.family: root.sfFont
+                                font.pixelSize: 12
+                                font.bold: true
+                                color: root.lyricsLines.length > 0 ? "#93c5fd" : "#60ffffff"
+                                renderType: Text.NativeRendering
+                                text: root.lyricsLoading
+                                    ? "Loading..."
+                                    : (root.lyricsLines.length > 0 ? (root.lyricsLines.length + " lines") : "No Lyrics")
+                            }
+
+                            Rectangle {
+                                implicitWidth: 26
+                                implicitHeight: 26
+                                radius: 13
+                                color: refreshHov.hovered ? "#28ffffff" : "#14ffffff"
+                                border.color: refreshHov.hovered ? "#48ffffff" : "#20ffffff"
+                                border.width: 1
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    font.family: root.iconFont
+                                    font.pixelSize: 12
+                                    color: refreshHov.hovered ? "#ffffff" : "#88ffffff"
+                                    text: "󰑐"
+                                }
+
+                                HoverHandler { id: refreshHov; cursorShape: Qt.PointingHandCursor }
+                                TapHandler {
+                                    onTapped: {
+                                        root.fetchLyrics(true)
+                                    }
+                                }
+                            }
+                        }
                     }
 
-                    // Canvas Visualizer Area
+                    // ── Stack of Views: Visualizer (Tab 0) or Live Lyrics (Tab 1) ──
                     Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
 
-                        Canvas {
-                            id: vizCanvas
+                        // ═════════════════════════════════════════════════
+                        // VIEW 0: AUDIO VISUALIZER CANVAS
+                        // ═════════════════════════════════════════════════
+                        Item {
                             anchors.fill: parent
-                            renderTarget: Canvas.FramebufferObject
-                            renderStrategy: Canvas.Threaded
+                            visible: root.bottomTab === 0
+                            opacity: root.bottomTab === 0 ? 1.0 : 0.0
+                            Behavior on opacity { NumberAnimation { duration: 180 } }
 
-                            onPaint: {
-                                var ctx = getContext("2d")
-                                ctx.clearRect(0, 0, width, height)
-                                if (!root.cavaBars || root.cavaBars.length === 0) return
+                            Canvas {
+                                id: vizCanvas
+                                anchors.fill: parent
+                                renderTarget: Canvas.FramebufferObject
+                                renderStrategy: Canvas.Threaded
+                                visible: root.bottomTab === 0
 
-                                const bars = root.cavaBars
-                                const numBars = bars.length
-                                const gap = 3
-                                const total = width
-                                const barW = Math.max(2, Math.floor((total - gap * (numBars - 1)) / numBars))
-                                const maxH = height - 6
-                                const style = root.vizStyle
+                                onPaint: {
+                                    var ctx = getContext("2d")
+                                    ctx.clearRect(0, 0, width, height)
+                                    if (!root.cavaBars || root.cavaBars.length === 0) return
 
-                                const baseHue = Math.round(root.vizPhase) % 360
-                                const endHue = Math.round(root.vizPhase + 25) % 360
+                                    const bars = root.cavaBars
+                                    const numBars = bars.length
+                                    const gap = 3
+                                    const total = width
+                                    const barW = Math.max(2, Math.floor((total - gap * (numBars - 1)) / numBars))
+                                    const maxH = height - 6
+                                    const style = root.vizStyle
 
-                                if (style === 2) {
-                                    // 3: Wave Bezier
-                                    const cy = height / 2
-                                    const grad = ctx.createLinearGradient(0, 0, width, 0)
-                                    grad.addColorStop(0.0, "hsla(" + baseHue + ", 95%, 62%, 1.0)")
-                                    grad.addColorStop(1.0, "hsla(" + endHue + ", 95%, 62%, 1.0)")
+                                    const baseHue = Math.round(root.vizPhase) % 360
+                                    const endHue = Math.round(root.vizPhase + 25) % 360
 
-                                    ctx.beginPath()
-                                    ctx.strokeStyle = grad
-                                    ctx.lineWidth = 2.5
-                                    ctx.lineCap = "round"
-                                    ctx.lineJoin = "round"
+                                    if (style === 2) {
+                                        // 3: Wave Bezier
+                                        const cy = height / 2
+                                        const grad = ctx.createLinearGradient(0, 0, width, 0)
+                                        grad.addColorStop(0.0, "hsla(" + baseHue + ", 95%, 62%, 1.0)")
+                                        grad.addColorStop(1.0, "hsla(" + endHue + ", 95%, 62%, 1.0)")
 
-                                    const pts = []
-                                    for (let i = 0; i < numBars; i++) {
-                                        const val = (bars[i] || 0) / 1000.0
-                                        const cx2 = i * (barW + gap) + barW / 2
-                                        pts.push({ x: cx2, y: cy - val * (cy - 4) })
-                                    }
-
-                                    if (pts.length > 1) {
-                                        ctx.moveTo(pts[0].x, pts[0].y)
-                                        for (let i = 0; i < pts.length - 1; i++) {
-                                            const cp1x = pts[i].x + (pts[i+1].x - pts[i].x) / 3
-                                            const cp1y = pts[i].y
-                                            const cp2x = pts[i+1].x - (pts[i+1].x - pts[i].x) / 3
-                                            const cp2y = pts[i+1].y
-                                            ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, pts[i+1].x, pts[i+1].y)
-                                        }
-                                        ctx.stroke()
-
-                                        // Mirror lower curve
                                         ctx.beginPath()
                                         ctx.strokeStyle = grad
-                                        ctx.moveTo(pts[0].x, cy + (cy - pts[0].y))
-                                        for (let i = 0; i < pts.length - 1; i++) {
-                                            const cp1x = pts[i].x + (pts[i+1].x - pts[i].x) / 3
-                                            const cp1y = cy + (cy - pts[i].y)
-                                            const cp2x = pts[i+1].x - (pts[i+1].x - pts[i].x) / 3
-                                            const cp2y = cy + (cy - pts[i].y)
-                                            ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, pts[i+1].x, cy + (cy - pts[i+1].y))
-                                        }
-                                        ctx.stroke()
+                                        ctx.lineWidth = 2.5
+                                        ctx.lineCap = "round"
+                                        ctx.lineJoin = "round"
 
-                                        for (let i = 0; i < pts.length; i++) {
+                                        const pts = []
+                                        for (let i = 0; i < numBars; i++) {
                                             const val = (bars[i] || 0) / 1000.0
-                                            const dotHue = Math.round(root.vizPhase + 10) % 360
-                                            ctx.fillStyle = "hsl(" + dotHue + ", 95%, 70%)"
+                                            const cx2 = i * (barW + gap) + barW / 2
+                                            pts.push({ x: cx2, y: cy - val * (cy - 4) })
+                                        }
+
+                                        if (pts.length > 1) {
+                                            ctx.moveTo(pts[0].x, pts[0].y)
+                                            for (let i = 0; i < pts.length - 1; i++) {
+                                                const cp1x = pts[i].x + (pts[i+1].x - pts[i].x) / 3
+                                                const cp1y = pts[i].y
+                                                const cp2x = pts[i+1].x - (pts[i+1].x - pts[i].x) / 3
+                                                const cp2y = pts[i+1].y
+                                                ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, pts[i+1].x, pts[i+1].y)
+                                            }
+                                            ctx.stroke()
+
+                                            // Mirror lower curve
                                             ctx.beginPath()
-                                            ctx.arc(pts[i].x, pts[i].y, Math.max(1.5, val * 4), 0, Math.PI * 2)
-                                            ctx.fill()
+                                            ctx.strokeStyle = grad
+                                            ctx.moveTo(pts[0].x, cy + (cy - pts[0].y))
+                                            for (let i = 0; i < pts.length - 1; i++) {
+                                                const cp1x = pts[i].x + (pts[i+1].x - pts[i].x) / 3
+                                                const cp1y = cy + (cy - pts[i].y)
+                                                const cp2x = pts[i+1].x - (pts[i+1].x - pts[i].x) / 3
+                                                const cp2y = cy + (cy - pts[i].y)
+                                                ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, pts[i+1].x, cy + (cy - pts[i+1].y))
+                                            }
+                                            ctx.stroke()
+
+                                            for (let i = 0; i < pts.length; i++) {
+                                                const val = (bars[i] || 0) / 1000.0
+                                                const dotHue = Math.round(root.vizPhase + 10) % 360
+                                                ctx.fillStyle = "hsl(" + dotHue + ", 95%, 70%)"
+                                                ctx.beginPath()
+                                                ctx.arc(pts[i].x, pts[i].y, Math.max(1.5, val * 4), 0, Math.PI * 2)
+                                                ctx.fill()
+                                            }
+                                        }
+                                    } else {
+                                        for (let i = 0; i < numBars; i++) {
+                                            const val = (bars[i] || 0) / 1000.0
+                                            const barH = Math.max(2, val * maxH)
+                                            const x = i * (barW + gap)
+                                            const barHue = Math.round(root.vizPhase + (i / numBars) * 25) % 360
+                                            ctx.fillStyle = "hsla(" + barHue + ", 95%, " + Math.round(55 + val * 20) + "%, 1.0)"
+
+                                            if (style === 0) {
+                                                // 1: Vertical Bars from bottom
+                                                ctx.fillRect(x, height - barH, barW, barH)
+                                            } else {
+                                                // 2: Symmetric Mirror from center
+                                                const halfH = barH / 2
+                                                const cy = height / 2
+                                                ctx.fillRect(x, cy - halfH, barW, barH)
+                                            }
                                         }
                                     }
-                                } else {
-                                    for (let i = 0; i < numBars; i++) {
-                                        const val = (bars[i] || 0) / 1000.0
-                                        const barH = Math.max(2, val * maxH)
-                                        const x = i * (barW + gap)
-                                        const barHue = Math.round(root.vizPhase + (i / numBars) * 25) % 360
-                                        ctx.fillStyle = "hsla(" + barHue + ", 95%, " + Math.round(55 + val * 20) + "%, 1.0)"
+                                }
 
-                                        if (style === 0) {
-                                            // 1: Vertical Bars from bottom
-                                            ctx.fillRect(x, height - barH, barW, barH)
-                                        } else {
-                                            // 2: Symmetric Mirror from center
-                                            const halfH = barH / 2
-                                            const cy = height / 2
-                                            ctx.fillRect(x, cy - halfH, barW, barH)
+                                Connections {
+                                    target: root
+                                    function onCavaBarsChanged() {
+                                        if (vizCanvas.visible) vizCanvas.requestPaint()
+                                    }
+                                    function onVizStyleChanged() {
+                                        if (vizCanvas.visible) vizCanvas.requestPaint()
+                                    }
+                                }
+                            }
+                        }
+
+                        // ═════════════════════════════════════════════════
+                        // VIEW 1: LIVE SYNCHRONIZED LYRICS
+                        // ═════════════════════════════════════════════════
+                        Item {
+                            anchors.fill: parent
+                            visible: root.bottomTab === 1
+                            opacity: root.bottomTab === 1 ? 1.0 : 0.0
+                            Behavior on opacity { NumberAnimation { duration: 180 } }
+
+                            // 1. Scrollable ListView of lyrics lines
+                            ListView {
+                                id: lyricsListView
+                                anchors.fill: parent
+                                anchors.topMargin: 2
+                                anchors.bottomMargin: 2
+                                visible: !root.lyricsLoading && root.lyricsLines.length > 0
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                spacing: 4
+                                model: root.lyricsLines
+
+                                delegate: Rectangle {
+                                    id: lyricRowItem
+                                    width: lyricsListView.width
+                                    implicitHeight: Math.max(38, lyricRowContent.implicitHeight + 14)
+                                    radius: 12
+
+                                    readonly property bool isCurrent: index === root.currentLyricIndex
+                                    readonly property bool isPast: index < root.currentLyricIndex
+                                    readonly property real lineTime: (modelData && typeof modelData.time === "number") ? modelData.time : 0
+                                    readonly property string lineText: (modelData && modelData.text !== undefined) ? ("" + modelData.text).trim() : ""
+
+                                    color: isCurrent 
+                                        ? "#26ffffff" 
+                                        : (lyricMouseArea.containsMouse ? "#14ffffff" : "transparent")
+                                    border.color: isCurrent 
+                                        ? "#48ffffff" 
+                                        : (lyricMouseArea.containsMouse ? "#24ffffff" : "transparent")
+                                    border.width: 1
+
+                                    Behavior on color { ColorAnimation { duration: 160 } }
+                                    Behavior on border.color { ColorAnimation { duration: 160 } }
+
+                                    scale: isCurrent ? 1.01 : 1.0
+                                    Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutQuad } }
+
+                                    RowLayout {
+                                        id: lyricRowContent
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 12
+                                        anchors.rightMargin: 12
+                                        anchors.topMargin: 4
+                                        anchors.bottomMargin: 4
+                                        spacing: 10
+
+                                        // Left Singing Indicator Icon
+                                        Text {
+                                            font.family: root.iconFont
+                                            font.pixelSize: 13
+                                            color: root.gradColor1 || "#93c5fd"
+                                            text: "󰎆"
+                                            visible: lyricRowItem.isCurrent
+                                            opacity: lyricRowItem.isCurrent ? 1.0 : 0.0
+                                            Behavior on opacity { NumberAnimation { duration: 150 } }
+                                        }
+
+                                        // Lyric text (word wraps for long lines, highlights on active)
+                                        Text {
+                                            id: lyricLabel
+                                            Layout.fillWidth: true
+                                            text: lyricRowItem.lineText.length > 0 ? lyricRowItem.lineText : "♪ ♪ ♪"
+                                            font.family: root.sfFont
+                                            font.pixelSize: lyricRowItem.isCurrent ? 16 : 14
+                                            font.bold: lyricRowItem.isCurrent
+                                            font.italic: lyricRowItem.lineText.length === 0
+                                            wrapMode: Text.WordWrap
+                                            renderType: Text.NativeRendering
+                                            color: {
+                                                if (lyricRowItem.isCurrent) return "#ffffff"
+                                                if (lyricMouseArea.containsMouse) return "#f1f5f9"
+                                                if (lyricRowItem.isPast) return "#64748b"
+                                                return "#94a3b8"
+                                            }
+
+                                            Behavior on font.pixelSize { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
+                                            Behavior on color { ColorAnimation { duration: 150 } }
+                                        }
+
+                                        // Timestamp readout on right side (visible on current or hover)
+                                        Text {
+                                            font.family: root.sfFont
+                                            font.pixelSize: 11
+                                            font.bold: lyricRowItem.isCurrent
+                                            color: lyricRowItem.isCurrent ? "#93c5fd" : "#60ffffff"
+                                            text: root.formatSecs(lyricRowItem.lineTime)
+                                            renderType: Text.NativeRendering
+                                            opacity: (lyricRowItem.isCurrent || lyricMouseArea.containsMouse) ? 1.0 : 0.0
+                                            Behavior on opacity { NumberAnimation { duration: 150 } }
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: lyricMouseArea
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.seekPlayer(lyricRowItem.lineTime)
+                                            root.currentLyricIndex = index
+                                            root.scrollLyricsToActive()
                                         }
                                     }
                                 }
                             }
 
-                            Connections {
-                                target: root
-                                function onCavaBarsChanged() {
-                                    if (vizCanvas.visible) vizCanvas.requestPaint()
+                            // 2. Loading state with pulsing icon
+                            Item {
+                                anchors.fill: parent
+                                visible: root.lyricsLoading
+
+                                ColumnLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 8
+
+                                    Text {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        font.family: root.iconFont
+                                        font.pixelSize: 28
+                                        color: root.gradColor1 || "#93c5fd"
+                                        text: "󰎆"
+
+                                        SequentialAnimation on opacity {
+                                            loops: Animation.Infinite
+                                            running: root.lyricsLoading
+                                            NumberAnimation { from: 0.3; to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
+                                            NumberAnimation { from: 1.0; to: 0.3; duration: 600; easing.type: Easing.InOutQuad }
+                                        }
+                                    }
+
+                                    Text {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        font.family: root.sfFont
+                                        font.pixelSize: 13
+                                        font.bold: true
+                                        color: "#88ffffff"
+                                        text: "Fetching synchronized lyrics..."
+                                        renderType: Text.NativeRendering
+                                    }
                                 }
-                                function onVizStyleChanged() {
-                                    if (vizCanvas.visible) vizCanvas.requestPaint()
+                            }
+
+                            // 3. Graceful Empty state: "No synchronized lyrics available" with icon 󰎆
+                            Item {
+                                anchors.fill: parent
+                                visible: !root.lyricsLoading && root.lyricsLines.length === 0
+
+                                ColumnLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 6
+
+                                    Text {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        font.family: root.iconFont
+                                        font.pixelSize: 32
+                                        color: "#60ffffff"
+                                        text: "󰎆"
+                                    }
+
+                                    Text {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        font.family: root.sfFont
+                                        font.pixelSize: 14
+                                        font.bold: true
+                                        color: "#88ffffff"
+                                        text: "No synchronized lyrics available"
+                                        renderType: Text.NativeRendering
+                                    }
+
+                                    Text {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        font.family: root.sfFont
+                                        font.pixelSize: 12
+                                        color: "#50ffffff"
+                                        text: (root.effectivePlayer && root.effectivePlayer.trackTitle)
+                                            ? (root.effectivePlayer.trackArtist ? (root.effectivePlayer.trackArtist + " — " + root.effectivePlayer.trackTitle) : root.effectivePlayer.trackTitle)
+                                            : "Play music to display live lyrics"
+                                        elide: Text.ElideRight
+                                        renderType: Text.NativeRendering
+                                    }
+
+                                    // Retry button
+                                    Rectangle {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        Layout.topMargin: 4
+                                        implicitWidth: retryBtnRow.implicitWidth + 20
+                                        implicitHeight: 26
+                                        radius: 13
+                                        color: retryMouse.containsMouse ? "#2cffffff" : "#14ffffff"
+                                        border.color: retryMouse.containsMouse ? "#4cffffff" : "#24ffffff"
+                                        border.width: 1
+
+                                        RowLayout {
+                                            id: retryBtnRow
+                                            anchors.centerIn: parent
+                                            spacing: 6
+                                            Text {
+                                                font.family: root.iconFont
+                                                font.pixelSize: 12
+                                                color: "#ffffff"
+                                                text: "󰑐"
+                                            }
+                                            Text {
+                                                font.family: root.sfFont
+                                                font.pixelSize: 12
+                                                font.bold: true
+                                                color: "#ffffff"
+                                                text: "Retry"
+                                                renderType: Text.NativeRendering
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            id: retryMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                root.fetchLyrics(true)
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

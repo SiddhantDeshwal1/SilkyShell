@@ -44,6 +44,13 @@ Item {
     property string selectedDbusName: ""
     property string recentActiveDbusName: ""
 
+    // ── Lyrics streaming state ─────────────────────────────────────────
+    property string currentLyricLine: ""
+    property string nextLyricLine: ""
+    property bool hasLyrics: false
+    property bool isInstrumental: false
+    property bool lyricsModeEnabled: true
+
     readonly property var validPlayers: {
         const list = Mpris.players.values || []
         let hasDirectBrowser = false
@@ -121,18 +128,29 @@ Item {
     }
 
     // ── Phase state ───────────────────────────────────────────────────
-    // "idle" | "announce" | "title" | "visualizer" | "volume"
+    // "idle" | "announce" | "title" | "visualizer" | "volume" | "lyrics" | "call"
     property string currentPhase: "visualizer"
     property string savedPhase:   "visualizer"    // phase to restore after volume OSD
     property int    vizStyle:     0               // 0=vertical, 1=symmetric, 2=wave; cycles mod 3
     property int    vizCycleCount: 0              // counts visualizer styles displayed in visualizer phase (1 to 3)
     property real   vizPhase:     0
 
+    // Only drive continuous 60fps canvas repaints when music is playing, in a call, or menu is open
+    readonly property bool vizActive: ((root.playerState === "playing" && (root.currentPhase === "visualizer" || (root.currentPhase === "lyrics" && root.isInstrumental))) || root.inCall || (typeof mediaMenu !== 'undefined' && mediaMenu && mediaMenu.open))
+
     NumberAnimation on vizPhase {
         from: 0; to: 360
         duration: 10000
         loops: Animation.Infinite
-        running: (root.currentPhase === "visualizer" || root.inCall || (typeof mediaMenu !== 'undefined' && mediaMenu && mediaMenu.open))
+        running: root.vizActive
+    }
+
+    onVizActiveChanged: {
+        // Paint once on transition to static/idle state so canvas retains crisp appearance without background polling
+        if (!root.vizActive) {
+            if (slotAViz.visible && slotA.opacity > 0.01) slotAViz.requestPaint()
+            if (slotBViz.visible && slotB.opacity > 0.01) slotBViz.requestPaint()
+        }
     }
 
     // ── Volume OSD ────────────────────────────────────────────────────
@@ -182,7 +200,7 @@ Item {
     }
 
     // ── Cava data ─────────────────────────────────────────────────────
-    readonly property bool needsCava: (root.playerState === "playing" && (root.currentPhase === "visualizer" || (typeof mediaMenu !== 'undefined' && mediaMenu && mediaMenu.open)))
+    readonly property bool needsCava: (root.playerState === "playing" && (root.currentPhase === "visualizer" || (root.currentPhase === "lyrics" && root.isInstrumental) || (typeof mediaMenu !== 'undefined' && mediaMenu && mediaMenu.open)))
     property var cavaBars: new Array(16).fill(0)
 
     onNeedsCavaChanged: {
@@ -219,6 +237,115 @@ Item {
         repeat: false
         onTriggered: {
             if (root.needsCava && !cavaProc.running) cavaProc.running = true
+        }
+    }
+
+    // ── Live Lyrics Process ───────────────────────────────────────────
+    Process {
+        id: lyricsStreamProc
+        command: ["python3", Paths.script("lyrics-service.py"), "daemon"]
+        running: root.playerState === "playing"
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function(line) {
+                root.parseLyricsJson(line.trim())
+            }
+        }
+        onExited: function(code, status) {
+            if (root.playerState === "playing") lyricsRestartTimer.restart()
+        }
+    }
+
+    Timer {
+        id: lyricsRestartTimer
+        interval: 1000
+        repeat: false
+        onTriggered: {
+            if (root.playerState === "playing" && !lyricsStreamProc.running)
+                lyricsStreamProc.running = true
+        }
+    }
+
+    function parseLyricsJson(raw) {
+        if (!raw || raw.length === 0) return
+        try {
+            const data = JSON.parse(raw)
+            if (typeof data !== "object" || data === null) return
+
+            const prevHasLyrics = root.hasLyrics
+            const prevInstrumental = root.isInstrumental
+            const prevLine = root.currentLyricLine
+
+            const hasL = data.hasLyrics !== undefined ? !!data.hasLyrics : false
+            const curLine = (data.currentLine !== undefined ? data.currentLine : (data.currentLyricLine !== undefined ? data.currentLyricLine : "")) || ""
+            const nxtLine = (data.nextLine !== undefined ? data.nextLine : (data.nextLyricLine !== undefined ? data.nextLyricLine : "")) || ""
+            const instrumental = data.isInstrumental !== undefined ? !!data.isInstrumental : false
+
+            root.hasLyrics = hasL
+            root.nextLyricLine = nxtLine
+            root.isInstrumental = instrumental
+            root.currentLyricLine = curLine
+
+            if (root.lyricsModeEnabled && root.hasLyrics && root.playerState === "playing") {
+                // If lyrics became available while in visualizer
+                if (hasL && !prevHasLyrics && root.currentPhase === "visualizer") {
+                    root.currentPhase = "lyrics"
+                    phaseTimer.stop()
+                    if (instrumental) {
+                        root.slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
+                    } else if (curLine) {
+                        root.slideTo("lyrics", curLine, "#ffffff", false)
+                    }
+                    return
+                }
+
+                // If currently in lyrics phase:
+                if (root.currentPhase === "lyrics") {
+                    if (instrumental && !prevInstrumental) {
+                        // Temporarily transition to visualizer during instrumental interlude
+                        root.slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
+                    } else if (!instrumental && prevInstrumental) {
+                        // When vocals resume, transition back to lyrics
+                        root.slideTo("lyrics", curLine, "#ffffff", false)
+                    } else if (!instrumental && curLine !== prevLine) {
+                        // New lyric line
+                        root.slideTo("lyrics", curLine, "#ffffff", false)
+                    }
+                }
+            } else if (!hasL && root.currentPhase === "lyrics") {
+                // Lost lyrics -> fallback to visualizer & title cycle
+                root.advancePhase()
+            }
+        } catch (e) {
+            // ignore non-json lines
+        }
+    }
+
+    onLyricsModeEnabledChanged: {
+        if (!lyricsModeEnabled && currentPhase === "lyrics") {
+            vizCycleCount = 1
+            currentPhase = "visualizer"
+            slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
+            phaseTimer.interval = 15000
+            phaseTimer.restart()
+        } else if (lyricsModeEnabled && hasLyrics && playerState === "playing" && currentPhase === "visualizer") {
+            currentPhase = "lyrics"
+            phaseTimer.stop()
+            if (isInstrumental) {
+                slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
+            } else {
+                slideTo("lyrics", root.currentLyricLine, "#ffffff", false)
+            }
+        }
+    }
+
+    onHasLyricsChanged: {
+        if (!hasLyrics && currentPhase === "lyrics") {
+            vizCycleCount = 1
+            currentPhase = "visualizer"
+            slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
+            phaseTimer.interval = 15000
+            phaseTimer.restart()
         }
     }
 
@@ -386,6 +513,10 @@ Item {
         volDebounce.stop()
 
         if (newState === "idle") {
+            root.currentLyricLine = ""
+            root.nextLyricLine = ""
+            root.hasLyrics = false
+            root.isInstrumental = false
             // When no music is playing, change to visualizer mode
             phaseTimer.stop()
             currentPhase = "visualizer"
@@ -407,6 +538,10 @@ Item {
 
     // Called when track changes while already playing or paused
     function onTrackChanged() {
+        root.currentLyricLine = ""
+        root.nextLyricLine = ""
+        root.hasLyrics = false
+        root.isInstrumental = false
         if (playerState === "idle") return
         startLoop("NEW")
     }
@@ -429,10 +564,12 @@ Item {
 
     function switchVizStyle(newStyle) {
         if (newStyle === root.vizStyle) return
-        if (currentPhase === "visualizer") {
+        if (currentPhase === "visualizer" || (currentPhase === "lyrics" && root.isInstrumental)) {
             slideTo("visualizer", "", "#ffffff", true, newStyle)
-            phaseTimer.interval = 15000
-            phaseTimer.restart()
+            if (currentPhase === "visualizer") {
+                phaseTimer.interval = 15000
+                phaseTimer.restart()
+            }
         } else {
             root.vizStyle = newStyle
         }
@@ -442,6 +579,7 @@ Item {
     function advancePhase() {
         if (currentPhase === "volume") return   // volume OSD controls itself
         if (currentPhase === "call") return     // call mode controls itself
+        if (currentPhase === "lyrics") return   // lyrics daemon controls itself
 
         if (playerState === "idle") {
             // When no music is playing, cycle through visualizer styles smoothly (15s each)
@@ -491,14 +629,31 @@ Item {
         }
 
         if (playerState === "playing") {
-            if (currentPhase === "announce" || currentPhase === "title") {
-                // → visualizer style 1 (15s)
-                vizCycleCount = 1
-                const nextStyle = (root.vizStyle + 1) % 3
-                currentPhase = "visualizer"
-                slideTo("visualizer", "", "#ffffff", true, nextStyle)
-                phaseTimer.interval = 15000
+            if (currentPhase === "announce") {
+                // After announce (NOW PLAYING, 2s), enter title (3s)
+                currentPhase = "title"
+                slideTo("title", root.trackDisplay, "#ffffff", false)
+                phaseTimer.interval = (root.lyricsModeEnabled && root.hasLyrics) ? 3000 : 5000
                 phaseTimer.restart()
+            } else if (currentPhase === "title") {
+                if (root.lyricsModeEnabled && root.hasLyrics) {
+                    // Enter lyrics phase
+                    currentPhase = "lyrics"
+                    phaseTimer.stop()
+                    if (root.isInstrumental) {
+                        slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
+                    } else {
+                        slideTo("lyrics", root.currentLyricLine, "#ffffff", false)
+                    }
+                } else {
+                    // Fall back to standard visualizer & title cycle
+                    vizCycleCount = 1
+                    const nextStyle = (root.vizStyle + 1) % 3
+                    currentPhase = "visualizer"
+                    slideTo("visualizer", "", "#ffffff", true, nextStyle)
+                    phaseTimer.interval = 15000
+                    phaseTimer.restart()
+                }
             } else if (currentPhase === "visualizer") {
                 if (vizCycleCount < 3) {
                     // Stay in visualizer: switch to next visualizer style for another 15s (smooth transition)
@@ -508,15 +663,26 @@ Item {
                     phaseTimer.interval = 15000
                     phaseTimer.restart()
                 } else {
-                    // Completed 3 visualizer styles (45s total) -> title (5s)
-                    vizCycleCount = 0
-                    currentPhase = "title"
-                    slideTo("title",
-                            root.trackDisplay,
-                            "#ffffff",
-                            false)
-                    phaseTimer.interval = 5000
-                    phaseTimer.restart()
+                    // Completed 3 visualizer styles (45s total)
+                    if (root.lyricsModeEnabled && root.hasLyrics) {
+                        vizCycleCount = 0
+                        currentPhase = "lyrics"
+                        phaseTimer.stop()
+                        if (root.isInstrumental) {
+                            slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
+                        } else {
+                            slideTo("lyrics", root.currentLyricLine, "#ffffff", false)
+                        }
+                    } else {
+                        vizCycleCount = 0
+                        currentPhase = "title"
+                        slideTo("title",
+                                root.trackDisplay,
+                                "#ffffff",
+                                false)
+                        phaseTimer.interval = 5000
+                        phaseTimer.restart()
+                    }
                 }
             }
         }
@@ -613,11 +779,18 @@ Item {
                 return
             }
 
-            // ── BUG FIX ───────────────────────────────────────────────────────
-            // Instead of trying to restore the exact saved phase (which is fragile
-            // when playerState changes mid-OSD or volume fires during animation),
-            // always restart the loop cleanly.  The loop begins at "announce"
-            // which is always a valid starting point.
+            // If returning from volume OSD during lyrics mode, restore lyrics directly
+            if (root.savedPhase === "lyrics" && root.lyricsModeEnabled && root.hasLyrics && root.playerState === "playing") {
+                root.currentPhase = "lyrics"
+                if (root.isInstrumental) {
+                    root.slideTo("visualizer", "", "#ffffff", true, root.vizStyle)
+                } else {
+                    root.slideTo("lyrics", root.currentLyricLine, "#ffffff", false)
+                }
+                return
+            }
+
+            // Otherwise, restart the loop cleanly at "announce"
             root.startLoop(root.playerState === "playing" ? "NEW" : "RESUME")
         }
     }
@@ -660,6 +833,7 @@ Item {
         if (activeSlot === 0) {
             // slotB becomes incoming
             slotBTitle.reset()
+            slotBLyrics.reset()
 
             slotBStatus.text    = label
             slotBStatus.color   = color
@@ -668,6 +842,10 @@ Item {
             slotBTitle.text     = label
             slotBTitle.color    = color
             slotBTitle.visible  = (phase === "title")
+
+            slotBLyrics.text    = label
+            slotBLyrics.color   = color
+            slotBLyrics.visible = (phase === "lyrics")
 
             slotB.slotVizStyle  = desiredStyle
             slotBViz.visible    = isViz
@@ -685,6 +863,7 @@ Item {
         } else {
             // slotA becomes incoming
             slotATitle.reset()
+            slotALyrics.reset()
 
             slotAStatus.text    = label
             slotAStatus.color   = color
@@ -693,6 +872,10 @@ Item {
             slotATitle.text     = label
             slotATitle.color    = color
             slotATitle.visible  = (phase === "title")
+
+            slotALyrics.text    = label
+            slotALyrics.color   = color
+            slotALyrics.visible = (phase === "lyrics")
 
             slotA.slotVizStyle  = desiredStyle
             slotAViz.visible    = isViz
@@ -728,14 +911,20 @@ Item {
             slotA.opacity = 1
             slotB.opacity = 0
             slotBTitle.reset()
+            slotBLyrics.reset()
             slotBViz.visible = false
             slotBVol.visible = false
             slotBCall.visible = false
             slotBStatus.visible = false
+            slotBLyrics.visible = false
 
             if (slotATitle.visible && slotATitle.isOverflow) {
                 slotATitle.reset()
                 slotATitleAnim.restart()
+            }
+            if (slotALyrics.visible && slotALyrics.isOverflow) {
+                slotALyrics.reset()
+                slotALyricsAnim.restart()
             }
         } else {
             root.vizStyle = slotB.slotVizStyle
@@ -743,14 +932,20 @@ Item {
             slotB.opacity = 1
             slotA.opacity = 0
             slotATitle.reset()
+            slotALyrics.reset()
             slotAViz.visible = false
             slotAVol.visible = false
             slotACall.visible = false
             slotAStatus.visible = false
+            slotALyrics.visible = false
 
             if (slotBTitle.visible && slotBTitle.isOverflow) {
                 slotBTitle.reset()
                 slotBTitleAnim.restart()
+            }
+            if (slotBLyrics.visible && slotBLyrics.isOverflow) {
+                slotBLyrics.reset()
+                slotBLyricsAnim.restart()
             }
         }
     }
@@ -946,6 +1141,94 @@ Item {
                 }
             }
 
+            // 2b. Live Lyrics (centered if fits, marquee scroll if overflow)
+            Item {
+                id: slotALyrics
+                anchors.fill: parent
+                anchors.leftMargin: 8
+                anchors.rightMargin: 8
+                visible: false
+                clip: true
+
+                property string text: ""
+                property color color: "#ffffff"
+
+                Text {
+                    id: slotALyricsMetric
+                    visible: false
+                    font.family: root.sfFont
+                    font.pixelSize: 19
+                    font.bold: false
+                    text: slotALyrics.text
+                }
+
+                property bool isOverflow: slotALyricsMetric.implicitWidth > slotALyrics.width
+                property real scrollDistance: slotALyricsMetric.implicitWidth + 40
+
+                Item {
+                    id: slotALyricsTrack
+                    height: parent.height
+                    width: slotALyrics.isOverflow ? (slotALyricsMetric.implicitWidth * 2 + 80) : parent.width
+                    x: slotALyrics.isOverflow ? 0 : Math.max(0, Math.round((slotALyrics.width - slotALyricsMetric.implicitWidth) / 2))
+
+                    Text {
+                        id: slotALyrics1
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: 0
+                        font.family: root.sfFont
+                        font.pixelSize: 19
+                        font.bold: false
+                        renderType: Text.NativeRendering
+                        color: slotALyrics.color
+                        text: slotALyrics.text
+                    }
+
+                    Text {
+                        id: slotALyrics2
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: slotALyricsMetric.implicitWidth + 40
+                        font.family: root.sfFont
+                        font.pixelSize: 19
+                        font.bold: false
+                        renderType: Text.NativeRendering
+                        color: slotALyrics.color
+                        text: slotALyrics.text
+                        visible: slotALyrics.isOverflow
+                    }
+                }
+
+                SequentialAnimation {
+                    id: slotALyricsAnim
+                    running: slotALyrics.visible && root.activeSlot === 0 && !root.animating && slotALyrics.isOverflow
+                    loops: Animation.Infinite
+
+                    PauseAnimation { duration: 1200 }
+
+                    NumberAnimation {
+                        target: slotALyricsTrack
+                        property: "x"
+                        from: 0
+                        to: -slotALyrics.scrollDistance
+                        duration: Math.max(1000, slotALyrics.scrollDistance * 26)
+                        easing.type: Easing.Linear
+                    }
+
+                    PropertyAction {
+                        target: slotALyricsTrack
+                        property: "x"
+                        value: 0
+                    }
+                }
+
+                function reset() {
+                    slotALyricsAnim.stop()
+                    slotALyricsTrack.x = slotALyrics.isOverflow ? 0 : Math.max(0, Math.round((slotALyrics.width - slotALyricsMetric.implicitWidth) / 2))
+                }
+
+                onTextChanged: reset()
+                onWidthChanged: reset()
+            }
+
             // 3. Visualizer canvas
             Canvas {
                 id: slotAViz
@@ -1062,7 +1345,7 @@ Item {
                         if (slotAViz.visible && slotA.opacity > 0.01) slotAViz.requestPaint()
                     }
                     function onVizPhaseChanged() {
-                        if (slotAViz.visible && slotA.opacity > 0.01) slotAViz.requestPaint()
+                        if (root.vizActive && slotAViz.visible && slotA.opacity > 0.01) slotAViz.requestPaint()
                     }
                 }
             }
@@ -1318,6 +1601,94 @@ Item {
             }
         }
 
+        // 2b. Live Lyrics (centered if fits, marquee scroll if overflow)
+        Item {
+            id: slotBLyrics
+            anchors.fill: parent
+            anchors.leftMargin: 8
+            anchors.rightMargin: 8
+            visible: false
+            clip: true
+
+            property string text: ""
+            property color color: "#ffffff"
+
+            Text {
+                id: slotBLyricsMetric
+                visible: false
+                font.family: root.sfFont
+                font.pixelSize: 19
+                font.bold: false
+                text: slotBLyrics.text
+            }
+
+            property bool isOverflow: slotBLyricsMetric.implicitWidth > slotBLyrics.width
+            property real scrollDistance: slotBLyricsMetric.implicitWidth + 40
+
+            Item {
+                id: slotBLyricsTrack
+                height: parent.height
+                width: slotBLyrics.isOverflow ? (slotBLyricsMetric.implicitWidth * 2 + 80) : parent.width
+                x: slotBLyrics.isOverflow ? 0 : Math.max(0, Math.round((slotBLyrics.width - slotBLyricsMetric.implicitWidth) / 2))
+
+                Text {
+                    id: slotBLyrics1
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: 0
+                    font.family: root.sfFont
+                    font.pixelSize: 19
+                    font.bold: false
+                    renderType: Text.NativeRendering
+                    color: slotBLyrics.color
+                    text: slotBLyrics.text
+                }
+
+                Text {
+                    id: slotBLyrics2
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: slotBLyricsMetric.implicitWidth + 40
+                    font.family: root.sfFont
+                    font.pixelSize: 19
+                    font.bold: false
+                    renderType: Text.NativeRendering
+                    color: slotBLyrics.color
+                    text: slotBLyrics.text
+                    visible: slotBLyrics.isOverflow
+                }
+            }
+
+            SequentialAnimation {
+                id: slotBLyricsAnim
+                running: slotBLyrics.visible && root.activeSlot === 1 && !root.animating && slotBLyrics.isOverflow
+                loops: Animation.Infinite
+
+                PauseAnimation { duration: 1200 }
+
+                NumberAnimation {
+                    target: slotBLyricsTrack
+                    property: "x"
+                    from: 0
+                    to: -slotBLyrics.scrollDistance
+                    duration: Math.max(1000, slotBLyrics.scrollDistance * 26)
+                    easing.type: Easing.Linear
+                }
+
+                PropertyAction {
+                    target: slotBLyricsTrack
+                    property: "x"
+                    value: 0
+                }
+            }
+
+            function reset() {
+                slotBLyricsAnim.stop()
+                slotBLyricsTrack.x = slotBLyrics.isOverflow ? 0 : Math.max(0, Math.round((slotBLyrics.width - slotBLyricsMetric.implicitWidth) / 2))
+            }
+
+            onTextChanged: reset()
+            onWidthChanged: reset()
+        }
+
         // 3. Visualizer canvas
         Canvas {
             id: slotBViz
@@ -1431,7 +1802,7 @@ Item {
                     if (slotBViz.visible && slotB.opacity > 0.01) slotBViz.requestPaint()
                 }
                 function onVizPhaseChanged() {
-                    if (slotBViz.visible && slotB.opacity > 0.01) slotBViz.requestPaint()
+                    if (root.vizActive && slotBViz.visible && slotB.opacity > 0.01) slotBViz.requestPaint()
                 }
             }
         }
@@ -1698,7 +2069,18 @@ Item {
             } else if (mouse.button === Qt.RightButton) {
                 root.dispatchPlayerAction("next")
             } else if (mouse.button === Qt.MiddleButton) {
-                root.dispatchPlayerAction("prev")
+                if (mouse.modifiers & Qt.ShiftModifier) {
+                    root.dispatchPlayerAction("prev")
+                } else {
+                    root.lyricsModeEnabled = !root.lyricsModeEnabled
+                }
+            }
+        }
+
+        onDoubleClicked: function(mouse) {
+            if (mouse.button === Qt.LeftButton) {
+                root.lyricsModeEnabled = !root.lyricsModeEnabled
+                if (mediaMenu.open) mediaMenu.close()
             }
         }
 
