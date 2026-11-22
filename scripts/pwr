@@ -1,0 +1,84 @@
+#!/bin/bash
+
+chmod 0444 /sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/energy_uj 2>/dev/null || true
+
+# Auto-elevate to root if run as normal user
+if [ "$EUID" -ne 0 ]; then
+  exec sudo "$0" "$@"
+fi
+
+chmod 0444 /sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/energy_uj /sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:0/energy_uj 2>/dev/null || true
+
+# Ensure Ananicy-cpp is always actively prioritizing tasks
+systemctl is-active --quiet ananicy-cpp.service || systemctl start ananicy-cpp.service
+
+# Helper function to dynamically swap the BPF CPU scheduler
+set_scheduler() {
+    local sched=$1
+    echo "🧠 Switching CPU Scheduler to: $sched"
+    echo -e "default_sched = \"$sched\"\ndefault_mode = \"Auto\"" > /etc/scx_loader/config.toml
+    systemctl restart scx_loader.service
+}
+
+case "$1" in
+    peak|35w|35)
+        echo "🐉 Mode: Peak (Dragon) | Redlining the APU (35W / 100°C)"
+        ryzenadj --stapm-limit=35000 --fast-limit=35000 --slow-limit=35000 --tctl-temp=100
+        cpupower frequency-set -g performance
+        
+        # scx_bpfland: Protects interactive tasks (WM, terminal) under extreme load
+        set_scheduler "scx_bpfland"
+        ;;
+
+    performance|30w|30)
+        echo "🦅 Mode: Performance (Bird) | Maxing out the APU (30W / 100°C)"
+        ryzenadj --stapm-limit=30000 --fast-limit=30000 --slow-limit=30000 --tctl-temp=100
+        cpupower frequency-set -g performance
+        
+        # scx_bpfland: Aggressively protects interactive tasks under heavy load
+        set_scheduler "scx_bpfland"
+        ;;
+
+    boost|gaming|game|25w|25)
+        echo "🐎 Mode: Boost (Horse) | Boosting APU performance (25W / 100°C)"
+        ryzenadj --stapm-limit=25000 --fast-limit=25000 --slow-limit=25000 --tctl-temp=100
+        cpupower frequency-set -g performance
+        
+        # scx_bpfland: Aggressively protects interactive tasks under heavy load
+        set_scheduler "scx_bpfland"
+        ;;
+
+    dynamic|comfort|20w|20)
+        echo "🐇 Mode: Dynamic (Rabbit) | Dynamic APU performance (20W / 95°C)"
+        ryzenadj --stapm-limit=20000 --fast-limit=20000 --slow-limit=20000 --tctl-temp=95
+        cpupower frequency-set -g schedutil
+        
+        # scx_rusty: A well-rounded, Rust-based scheduler optimized for general throughput
+        set_scheduler "scx_rusty"
+        ;;
+
+    balanced|15w|15)
+        echo "🐱 Mode: Balanced (Cat) | Restoring stock APU limits (15W / 95°C)"
+        ryzenadj --stapm-limit=15000 --fast-limit=15000 --slow-limit=15000 --tctl-temp=95
+        cpupower frequency-set -g schedutil
+        
+        # scx_rusty: A well-rounded, Rust-based scheduler optimized for general throughput
+        set_scheduler "scx_rusty"
+        ;;
+
+    batterysaver|10w|10)
+        echo "🐢 Mode: Battery Saver (Turtle) | Underclocking for longevity (10W / 95°C)"
+        ryzenadj --stapm-limit=10000 --fast-limit=10000 --slow-limit=10000 --tctl-temp=95
+        cpupower frequency-set -g powersave
+        
+        # scx_lavd: Developed specifically for AMD handhelds to maximize power efficiency and frame pacing
+        set_scheduler "scx_lavd"
+        ;;
+
+    *)
+        echo "Usage: pwr {peak|performance|boost|dynamic|balanced|batterysaver|35w|30w|25w|20w|15w|10w}"
+        exit 1
+        ;;
+esac
+
+echo "✅ System state updated."
