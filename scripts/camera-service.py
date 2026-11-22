@@ -16,7 +16,7 @@ import signal
 import select
 import ctypes
 
-LOCK_PATH = "/tmp/quickshell_camera.lock"
+LOCK_PATH = os.environ.get("QUICKSHELL_CAMERA_LOCK", "/tmp/quickshell_camera.lock")
 
 # Inotify constants from <sys/inotify.h>
 IN_NONBLOCK = 0x00000800
@@ -95,13 +95,29 @@ def get_camera_state():
         return {"active": False, "apps": []}
 
     my_uid = os.getuid()
+    my_pid = os.getpid()
+    ignore_comm = {"quickshell", "qs", "wireplumber", "pipewire"}
+
     for pid_entry in os.scandir("/proc"):
         if not pid_entry.name.isdigit():
             continue
         pid = int(pid_entry.name)
+        if pid == my_pid:
+            continue
         try:
             if pid_entry.stat().st_uid != my_uid:
                 continue
+
+            # Fast check: skip known non-camera desktop components before walking fds
+            comm = ""
+            try:
+                with open(f"/proc/{pid}/comm", "r") as f:
+                    comm = f.read().strip()
+                if comm.lower() in ignore_comm:
+                    continue
+            except Exception:
+                continue
+
             fd_dir = f"/proc/{pid}/fd"
             for fd_entry in os.scandir(fd_dir):
                 try:
@@ -109,15 +125,7 @@ def get_camera_state():
                     if target in video_devs:
                         if pid in seen_pids:
                             continue
-                        comm = ""
-                        try:
-                            with open(f"/proc/{pid}/comm", "r") as f:
-                                comm = f.read().strip()
-                        except Exception:
-                            pass
-                        # Ignore quickshell itself, daemons, and audio servers
-                        if comm.lower() in ("quickshell", "qs", "wireplumber", "pipewire"):
-                            continue
+
                         cmdline = ""
                         try:
                             with open(f"/proc/{pid}/cmdline", "r") as f:
@@ -165,7 +173,7 @@ def run_daemon():
 
     # Monitor stdin for pipe hangup when Quickshell exits
     try:
-        poller.register(sys.stdin.fileno(), select.POLLHUP | select.POLLERR)
+        poller.register(sys.stdin.fileno(), select.POLLIN | select.POLLHUP | select.POLLERR)
     except Exception:
         pass
 
@@ -194,25 +202,43 @@ def run_daemon():
     # Initial emit
     emit_state()
 
-    # Main event loop: inotify triggers or 1.5s periodic fallback
+    # Heartbeat interval: 30s guard if inotify is active, 5s fallback if inotify unavailable
+    poll_timeout = 30000 if inotify_fd >= 0 else 5000
+
+    # Main event loop: event-driven via kernel inotify + passive safety heartbeat
     while True:
         try:
-            events = poller.poll(1500)
+            events = poller.poll(poll_timeout)
             recheck_watches = False
-            for fd, event in events:
-                if fd == sys.stdin.fileno():
-                    if event & (select.POLLHUP | select.POLLERR):
-                        sys.exit(0)
-                elif fd == inotify_fd:
-                    try:
-                        # Flush inotify events
-                        os.read(inotify_fd, 4096)
-                        recheck_watches = True
-                    except Exception:
-                        pass
+            should_emit = False
+
+            if not events:
+                # Passive safety heartbeat — recheck state quietly
+                should_emit = True
+            else:
+                for fd, event in events:
+                    if fd == sys.stdin.fileno():
+                        if event & (select.POLLHUP | select.POLLERR):
+                            sys.exit(0)
+                        try:
+                            chunk = sys.stdin.read(1)
+                            if not chunk:
+                                sys.exit(0)
+                        except Exception:
+                            sys.exit(0)
+                    elif fd == inotify_fd:
+                        try:
+                            # Drain all queued inotify events
+                            os.read(inotify_fd, 8192)
+                            recheck_watches = True
+                            should_emit = True
+                        except Exception:
+                            pass
+
             if recheck_watches:
                 setup_video_watches()
-            emit_state()
+            if should_emit:
+                emit_state()
         except (BrokenPipeError, KeyboardInterrupt):
             break
         except Exception:

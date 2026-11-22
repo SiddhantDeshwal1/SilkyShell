@@ -216,13 +216,30 @@ def get_monitors_data():
         clean_modes = []
         resolutions_seen = set()
         clean_resolutions = []
+        modes_by_rate = {}
 
         for mode_str in raw_modes:
             clean_modes.append(mode_str)
+            parts = mode_str.replace("Hz", "").split("@")
+            if len(parts) == 2:
+                r_res = parts[0].strip()
+                try:
+                    r_rate = int(round(float(parts[1])))
+                except Exception:
+                    r_rate = 60
+                r_key = str(r_rate)
+                if r_key not in modes_by_rate:
+                    modes_by_rate[r_key] = []
+                if r_res not in modes_by_rate[r_key]:
+                    modes_by_rate[r_key].append(r_res)
+
             res = mode_str.split("@")[0].strip()
             if res and res not in resolutions_seen:
                 resolutions_seen.add(res)
                 clean_resolutions.append(res)
+
+        sorted_rates = sorted([int(k) for k in modes_by_rate.keys()], reverse=True)
+        cur_refresh = int(round(m.get("refreshRate", 60.0)))
 
         active_res = f"{m.get('width', 0)}x{m.get('height', 0)}"
         refresh_rate = round(m.get("refreshRate", 60.0), 1)
@@ -253,6 +270,7 @@ def get_monitors_data():
             "width": m.get("width", 1920),
             "height": m.get("height", 1080),
             "refreshRate": refresh_rate,
+            "currentRefreshRate": cur_refresh,
             "activeMode": f"{active_res}@{refresh_rate}Hz",
             "currentResolution": active_res,
             "dpmsStatus": bool(m.get("dpmsStatus", True)),
@@ -264,6 +282,8 @@ def get_monitors_data():
             "y": m.get("y", 0),
             "availableModes": clean_modes,
             "resolutions": clean_resolutions,
+            "refreshRates": sorted_rates,
+            "modesByRate": modes_by_rate,
             "activeProfile": profiles.get(name, "default"),
             "transform": curr_trans,
             "arrangement": curr_arr
@@ -282,17 +302,50 @@ def get_monitors_data():
         "brightness": brightness
     }
 
-def set_resolution(monitor_name, mode_str):
+def find_best_mode(available_modes, target_res, target_rate=None):
+    target_res = target_res.split("@")[0].strip()
+    target_rate_num = None
+    if target_rate is not None:
+        try:
+            target_rate_num = round(float(str(target_rate).replace("Hz", "").strip()))
+        except Exception:
+            target_rate_num = None
+
+    for mode in available_modes:
+        clean = mode.replace("Hz", "").strip()
+        parts = clean.split("@")
+        if len(parts) == 2:
+            res, rate_str = parts[0].strip(), parts[1].strip()
+            if res == target_res:
+                if target_rate_num is None:
+                    return clean
+                try:
+                    if round(float(rate_str)) == target_rate_num:
+                        return clean
+                except Exception:
+                    pass
+
+    if target_rate_num is not None:
+        return f"{target_res}@{target_rate_num}"
+    return target_res
+
+def set_resolution(monitor_name, mode_str, target_rate=None):
     data = get_monitors_data()
     mon = next((m for m in data["monitors"] if m["name"] == monitor_name), None)
     
     pos = f"{mon['x']}x{mon['y']}" if mon else "auto"
     scale = mon["scale"] if mon else 1
     trans = mon["transform"] if mon else 0
+    available_modes = mon.get("availableModes", []) if mon else []
 
-    clean_mode = mode_str.replace("Hz", "").strip()
-    if "@" not in clean_mode and mon:
-        clean_mode = f"{clean_mode}@{int(mon['refreshRate'])}"
+    if target_rate is not None:
+        clean_mode = find_best_mode(available_modes, mode_str, target_rate)
+    elif "@" in mode_str:
+        parts = mode_str.split("@")
+        clean_mode = find_best_mode(available_modes, parts[0], parts[1])
+    else:
+        cur_rate = mon.get("currentRefreshRate", mon.get("refreshRate")) if mon else None
+        clean_mode = find_best_mode(available_modes, mode_str, cur_rate)
 
     if mon and mon["isMirrored"]:
         mirror_target = mon["mirrorOf"]
@@ -456,7 +509,8 @@ def main():
             first = data["monitors"][0]["name"] if data["monitors"] else "eDP-1"
             set_profile(first, sys.argv[2])
     elif sys.argv[1] == "set-resolution" and len(sys.argv) >= 4:
-        set_resolution(sys.argv[2], sys.argv[3])
+        rate = sys.argv[4] if len(sys.argv) >= 5 else None
+        set_resolution(sys.argv[2], sys.argv[3], rate)
     elif sys.argv[1] == "set-sharing" and len(sys.argv) >= 4:
         target = sys.argv[4] if len(sys.argv) >= 5 else ""
         set_sharing(sys.argv[2], sys.argv[3], target)

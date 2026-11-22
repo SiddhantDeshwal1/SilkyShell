@@ -223,8 +223,9 @@ def cmd_reset():
 def cmd_daemon():
     set_parent_death_signal()
     ensure_dir()
+    lock_path = os.environ.get("QUICKSHELL_TIMER_LOCK", "/tmp/quickshell_timer.lock")
     try:
-        lock_file = open("/tmp/quickshell_timer.lock", "a+")
+        lock_file = open(lock_path, "a+")
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         lock_file.seek(0)
         lock_file.truncate()
@@ -234,22 +235,33 @@ def cmd_daemon():
         sys.stderr.write("[TimerService] Another daemon instance is already running. Exiting.\n")
         sys.exit(0)
 
+    last_json = None
+    stdin_fd = sys.stdin if not sys.stdin.isatty() else None
+
     while True:
         try:
-            if not sys.stdin.isatty():
-                r, _, _ = select.select([sys.stdin], [], [], 0)
+            state = get_state()
+            encoded = json.dumps(state)
+            if encoded != last_json:
+                last_json = encoded
+                sys.stdout.write(encoded + "\n")
+                sys.stdout.flush()
+
+            # Responsive 0.5s ticks while actively timing; relaxed 1.0s when idle
+            poll_interval = 0.5 if state.get("running") else 1.0
+
+            if stdin_fd:
+                r, _, _ = select.select([stdin_fd], [], [], poll_interval)
                 if r:
                     chunk = sys.stdin.read(1)
-                    if chunk == "":
+                    if not chunk:
                         break
-            state = get_state()
-            sys.stdout.write(json.dumps(state) + "\n")
-            sys.stdout.flush()
+            else:
+                time.sleep(poll_interval)
         except BrokenPipeError:
             break
         except Exception:
-            pass
-        time.sleep(0.5)
+            time.sleep(1.0)
 
 def main():
     if len(sys.argv) < 2:

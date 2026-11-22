@@ -21,6 +21,7 @@ STATE_FILE = "/tmp/qs_screenshare.json"
 TARGET_FILE = "/tmp/qs_screenshare_target.json"
 CAST_FILE = "/tmp/qs_screencast.json"
 PID_FILE = "/tmp/qs_screenshare.pid"
+LOCK_PATH = os.environ.get("QUICKSHELL_SCREENSHARE_LOCK", "/tmp/quickshell_screenshare.lock")
 
 def set_parent_death_signal():
     """Ensure kernel delivers SIGTERM to this process if parent terminates."""
@@ -30,6 +31,22 @@ def set_parent_death_signal():
         libc.prctl(1, signal.SIGTERM)  # 1 = PR_SET_PDEATHSIG
     except Exception:
         pass
+
+def acquire_lock():
+    """Acquire singleton file lock to prevent duplicate daemon instances."""
+    import fcntl
+    try:
+        lock_file = open(LOCK_PATH, "a+")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(f"{os.getpid()}\n")
+        lock_file.flush()
+        return lock_file
+    except (BlockingIOError, IOError):
+        sys.stderr.write("[screenshare-service] Another daemon instance is already running. Exiting.\n")
+        sys.stderr.flush()
+        sys.exit(0)
 
 def write_atomic_state(state):
     tmp = STATE_FILE + ".tmp"
@@ -143,9 +160,21 @@ class ScreenShareDaemon:
         self.region_geom = {"x": 0, "y": 0, "width": 0, "height": 0}
         self.manual_test = False
         self.share_start_time = 0.0
+        self.journal_proc = None
+        self.lock_file = None
 
     def stop(self):
         self.running = False
+        if self.journal_proc:
+            try:
+                self.journal_proc.terminate()
+                self.journal_proc.wait(timeout=0.2)
+            except Exception:
+                try:
+                    self.journal_proc.kill()
+                except Exception:
+                    pass
+            self.journal_proc = None
 
     def load_pending_target(self):
         if os.path.exists(TARGET_FILE):
@@ -301,7 +330,7 @@ class ScreenShareDaemon:
                         self.update_geometry_and_emit()
                     elif self.is_sharing and not self.manual_test and self.share_type != "none":
                         # Check PipeWire & DBus stream health after a 3.0s initial startup grace period
-                        if (now - self.share_start_time > 3.0) and (now - last_check >= 0.5):
+                        if (now - self.share_start_time > 3.0) and (now - last_check >= 1.5):
                             last_check = now
                             if not is_pipewire_or_portal_streaming():
                                 with self.lock:
@@ -322,13 +351,14 @@ class ScreenShareDaemon:
                         self.share_type = "none"
                         self.manual_test = False
                     self.update_geometry_and_emit()
-            time.sleep(0.15)
+            time.sleep(0.35)
 
     def journal_loop(self):
         """Follows xdg-desktop-portal-hyprland logs for sharing start/stop events with unbuffered I/O."""
         cmd = ["stdbuf", "-oL", "-eL", "journalctl", "--user", "-u", "xdg-desktop-portal-hyprland", "-f", "-o", "cat", "-n", "0"]
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            self.journal_proc = proc
             for line in proc.stdout:
                 if not self.running:
                     break
@@ -454,13 +484,22 @@ class ScreenShareDaemon:
         # Emit initial state
         self.update_geometry_and_emit()
 
-        # Keep alive
+        # Monitor stdin for pipe hangup when Quickshell exits or restarts
+        stdin_fd = sys.stdin.fileno() if not sys.stdin.isatty() else None
         try:
             while self.running:
-                time.sleep(1.0)
+                if stdin_fd is not None:
+                    r, _, _ = select.select([stdin_fd], [], [], 1.0)
+                    if r:
+                        chunk = sys.stdin.read(1)
+                        if not chunk:  # Quickshell pipe closed
+                            break
+                else:
+                    time.sleep(1.0)
         except (KeyboardInterrupt, SystemExit):
             pass
         finally:
+            self.stop()
             write_atomic_state({
                 "isSharing": False,
                 "type": "none",
@@ -471,6 +510,12 @@ class ScreenShareDaemon:
             if os.path.exists(PID_FILE):
                 try:
                     os.remove(PID_FILE)
+                except Exception:
+                    pass
+            if self.lock_file:
+                try:
+                    fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
+                    self.lock_file.close()
                 except Exception:
                     pass
 
@@ -486,7 +531,9 @@ def main():
         print(json.dumps(get_current_state(), indent=2))
 
     elif cmd == "daemon":
+        lock_file = acquire_lock()
         daemon = ScreenShareDaemon()
+        daemon.lock_file = lock_file
         def sig_handler(sig, frame):
             daemon.stop()
             sys.exit(0)
